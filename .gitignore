@@ -1,0 +1,6 @@
+.codex/
+__pycache__/
+*.s
+*.o
+*.lst
+*.bin
