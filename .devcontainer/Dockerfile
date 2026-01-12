@@ -35,12 +35,12 @@ RUN set -eux; \
     useradd --uid "${UID}" --gid "${GID}" -s /bin/bash -m "${USERNAME}"
 
 # Enable sudo
-# RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-#     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-#     apt-get update \
-#     && apt-get install -y sudo \
-#     && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
-#     && chmod 0440 /etc/sudoers.d/$USERNAME
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && apt-get install -y sudo \
+    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME
 
 # https://github.com/moby/buildkit/issues/1662#issuecomment-683962222
 # https://docs.docker.com/reference/dockerfile/?__readwiseLocation=#example-cache-apt-packages
@@ -50,7 +50,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install --no-install-recommends -y \
     # Basic tools
     # ssh is required to handle GitHub in the container
-    git ssh \
+    git ssh ca-certificates \
+    # install python
+    python-is-python3 \
+    # C compiler and assembler for M6502
+    cc65 \
     # System tools
     locales tzdata \
     # Configure locale
@@ -59,6 +63,19 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # Configure timezone
     && ln -fs /usr/share/zoneinfo/Asia/Tokyo /etc/localtime \
     && dpkg-reconfigure -f noninteractive tzdata
+
+# install npm
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && apt-get install -y nodejs npm curl \
+    && npm install n -g \
+    && n stable \
+    && apt purge -y nodejs npm \
+    && apt autoremove -y
+
+# install Codex
+RUN npm i -g @openai/codex
 
 # Default user
 USER vscode
