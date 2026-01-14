@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 import re, ast, argparse, json
 from pathlib import Path
+from typing import Optional
 
 IDENT_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_%$@."
 
@@ -575,6 +576,7 @@ def convert_irpc_to_ca65(text: str, max_iters: int = 2000):
 def expand_exp_lines(text: str, sym: dict):
     out_lines = []
     for ln_ in nl(text).splitlines():
+        src_line = ln_
         code, *comment = ln_.split(";", 1)
         cmt = ";" + comment[0] if comment else ""
         m = re.match(r'^(\s*(?:[A-Z0-9_%$]+:\s*)?)EXP\s+(.+?)\s*$', code)
@@ -746,7 +748,7 @@ def comment_if_plain_text_line(line: str) -> str:
 
     return line
 
-def normalize_directives(text: str, defines: dict | None = None):
+def normalize_directives(text: str, defines: dict | None = None, annotate: bool = False):
     out = []
     defined_macros = set()
     seen_names = set()
@@ -860,7 +862,60 @@ def normalize_directives(text: str, defines: dict | None = None):
             return expr
         return f"${val & 0xFF:02X}"
 
-    def emit(line: str, consume_label: bool = True):
+    last_src_text = None
+    last_was_def = False
+    align_col = 48
+
+    def format_inline(line: str, src_text: str) -> str:
+        base = line.rstrip()
+        pad = " " if len(base) >= align_col else " " * (align_col - len(base))
+        return f"{base}{pad};|SRC| {src_text}"
+
+    def annotate_line(line: str, src: Optional[str]) -> str:
+        nonlocal last_src_text, last_was_def
+        if not annotate:
+            return line
+        if line.lstrip().startswith(";"):
+            return line
+        src_text = (src or "").rstrip("\n")
+        if src_text.strip().startswith(";"):
+            src_text = ""
+        if src_text:
+            line_code = line.split(";", 1)[0].strip()
+            src_code = src_text.split(";", 1)[0].strip()
+            line_norm = re.sub(r"\s+", " ", line_code)
+            src_norm = re.sub(r"\s+", " ", src_code)
+            if line_norm == src_norm:
+                return line
+        line_strip = line.lstrip()
+        if src_text and (line_strip.startswith(".undef") or line_strip.startswith(".define")):
+            if last_was_def and last_src_text == src_text:
+                last_src_text = src_text
+                last_was_def = True
+                return line
+            last_src_text = src_text
+            last_was_def = True
+            return f";|SRC| {src_text}\n{line}"
+        if src_text and ";" in line:
+            last_src_text = src_text
+            last_was_def = False
+            return f";|SRC| {src_text}\n{line}"
+        if line.strip() == "":
+            return line
+        if src_text:
+            last_src_text = src_text
+            last_was_def = False
+            return format_inline(line, src_text)
+        last_was_def = False
+        return line
+
+    def append_line(line: str, src: Optional[str]):
+        out.append(annotate_line(line, src))
+
+    def append_raw(line: str):
+        out.append(line)
+
+    def emit_no_annot(line: str, consume_label: bool = True):
         nonlocal pending_label
         if pending_label and consume_label:
             if re.match(r'^\s*\.', line) or re.match(r'^\s*[A-Z0-9_%$]', line):
@@ -868,7 +923,33 @@ def normalize_directives(text: str, defines: dict | None = None):
             else:
                 line = f"{pending_label}: {line}"
             pending_label = None
-        out.append(line)
+        append_raw(line)
+
+    def emit_block(lines: list[str], consume_label_first: bool = True, src: Optional[str] = None):
+        nonlocal last_src_text, last_was_def
+        if src is None:
+            src = src_line
+        src_text = (src or "").rstrip("\n")
+        if src_text.strip().startswith(";"):
+            src_text = ""
+        if annotate and src_text:
+            append_raw(f";|SRC| {src_text}")
+        for i, line in enumerate(lines):
+            emit_no_annot(line, consume_label=(consume_label_first and i == 0))
+        last_src_text = src_text or last_src_text
+        last_was_def = False
+
+    def emit(line: str, consume_label: bool = True, src: Optional[str] = None):
+        nonlocal pending_label
+        if src is None:
+            src = src_line
+        if pending_label and consume_label:
+            if re.match(r'^\s*\.', line) or re.match(r'^\s*[A-Z0-9_%$]', line):
+                line = f"{pending_label}: {line.lstrip()}"
+            else:
+                line = f"{pending_label}: {line}"
+            pending_label = None
+        append_line(line, src)
 
     def fix_trailing_commas_in_op(line: str) -> str:
         m = re.match(r'^(\s*(?:[A-Z0-9_%$]+:\s*)?)([A-Z]{3})\b(.*)$', line)
@@ -903,25 +984,47 @@ def normalize_directives(text: str, defines: dict | None = None):
             return m.group(0)
         return re.sub(r"\b([A-Za-z0-9_%$]+)-1,([XY])\b", repl, line)
 
-    def emit_redefine(name: str, expr_out: str, cmt: str, consume_label: bool = False):
+    def emit_redefine(name: str, expr_out: str, cmt: str, consume_label: bool = False, src: Optional[str] = None):
         needs_temp = bool(re.search(rf'(?<![A-Za-z0-9_%$]){re.escape(name)}(?![A-Za-z0-9_%$])', expr_out))
         if name in defined_names:
             if needs_temp:
                 tmp = f"__{name}_TMP"
-                emit(f"    .define {tmp} {name}", consume_label=consume_label)
-                emit(f"    .undef {name}", consume_label=False)
+                emit(f"    .define {tmp} {name}", consume_label=consume_label, src=src)
+                emit(f"    .undef {name}", consume_label=False, src=src)
                 expr_out = re.sub(
                     rf'(?<![A-Za-z0-9_%$]){re.escape(name)}(?![A-Za-z0-9_%$])',
                     tmp,
                     expr_out,
                 )
-                emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
-                emit(f"    .undef {tmp}", consume_label=False)
+                emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False, src=src)
+                emit(f"    .undef {tmp}", consume_label=False, src=src)
                 defined_names.add(name)
                 return
-            emit(f"    .undef {name}", consume_label=consume_label)
-        emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=consume_label)
+            emit(f"    .undef {name}", consume_label=consume_label, src=src)
+        emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=consume_label, src=src)
         defined_names.add(name)
+
+    def redefine_lines(name: str, expr_out: str, cmt: str) -> list[str]:
+        lines = []
+        needs_temp = bool(re.search(rf'(?<![A-Za-z0-9_%$]){re.escape(name)}(?![A-Za-z0-9_%$])', expr_out))
+        if name in defined_names:
+            if needs_temp:
+                tmp = f"__{name}_TMP"
+                lines.append(f"    .define {tmp} {name}")
+                lines.append(f"    .undef {name}")
+                expr_out = re.sub(
+                    rf'(?<![A-Za-z0-9_%$]){re.escape(name)}(?![A-Za-z0-9_%$])',
+                    tmp,
+                    expr_out,
+                )
+                lines.append(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""))
+                lines.append(f"    .undef {tmp}")
+                defined_names.add(name)
+                return lines
+            lines.append(f"    .undef {name}")
+        lines.append(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""))
+        defined_names.add(name)
+        return lines
 
     predefine = [
         f"    .define {name} 0"
@@ -937,6 +1040,7 @@ def normalize_directives(text: str, defines: dict | None = None):
     }
 
     for ln_ in nl(text).splitlines():
+        src_line = ln_
         if defines:
             code = ln_.split(";", 1)[0]
             rest = code.strip()
@@ -954,7 +1058,7 @@ def normalize_directives(text: str, defines: dict | None = None):
         cmt = ";" + comment[0] if comment else ""
         s = code.rstrip()
         if not s.strip():
-            out.append(ln_)
+            append_line(ln_, src_line)
             continue
         if defines and macro_depth == 0:
             rest = s.strip()
@@ -979,7 +1083,7 @@ def normalize_directives(text: str, defines: dict | None = None):
             for ln_ in predefine:
                 if ln_.split()[1] == "Q":
                     continue
-                out.append(ln_)
+                append_line(ln_, "(generated)")
                 defined_names.add(ln_.split()[1])
             preamble_emitted = True
         s = replace_char_literals(s)
@@ -992,12 +1096,12 @@ def normalize_directives(text: str, defines: dict | None = None):
             if m_dot and m_dot.group(1).lower() in allowed_dot:
                 pass
             else:
-                out.append("; " + s.strip())
+                append_line("; " + s.strip(), src_line)
                 continue
 
         # listing/meta directives become comments
         if re.match(r'^\s*(TITLE|SUBTTL|PAGE|COMMENT|SALL|SEARCH)\b', s):
-            out.append("; " + s.strip())
+            append_line("; " + s.strip(), src_line)
             continue
         m = re.match(r'^\s*RADIX\b\s*([0-9]+)?', s, re.IGNORECASE)
         if m:
@@ -1006,12 +1110,12 @@ def normalize_directives(text: str, defines: dict | None = None):
                     cur_radix = int(m.group(1))
                 except Exception:
                     pass
-            out.append("; " + s.strip())
+            append_line("; " + s.strip(), src_line)
             continue
 
         # end/purge directives are not used by ca65
         if re.match(r'^\s*END\b(?!\s*:)', s) or re.match(r'^\s*PURGE\b', s):
-            out.append("; " + s.strip())
+            append_line("; " + s.strip(), src_line)
             continue
 
         if macro_depth > 0 and not re.match(r'^\s*\.endmacro\b', s, re.IGNORECASE):
@@ -1034,19 +1138,19 @@ def normalize_directives(text: str, defines: dict | None = None):
                 lab = normalize_symbol_tokens(lab_raw)
                 left = m_xwd.group(2).strip()
                 right = m_xwd.group(3).strip()
-                emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""))
+                emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""), src=src_line)
                 continue
             stripped = s.strip()
             if re.fullmatch(r'[0-9\-\+\^$][0-9A-Fa-f\-\+\*/\(\) ]*', stripped):
                 indent = re.match(r"^\s*", s).group(0)
                 expr = clamp_byte_expr(stripped)
-                emit(f"{indent}.byte {expr}" + ((" " + cmt) if cmt else ""))
+                emit(f"{indent}.byte {expr}" + ((" " + cmt) if cmt else ""), src=src_line)
                 continue
             if re.fullmatch(r"'[^'\\]'", stripped):
                 indent = re.match(r"^\s*", s).group(0)
-                emit(f"{indent}.byte {stripped}" + ((" " + cmt) if cmt else ""))
+                emit(f"{indent}.byte {stripped}" + ((" " + cmt) if cmt else ""), src=src_line)
                 continue
-            emit(s + ((" " + cmt) if cmt else ""))
+            emit(s + ((" " + cmt) if cmt else ""), src=src_line)
             if re.match(r'^\s*\.macro\b', s, re.IGNORECASE):
                 macro_depth += 1
             if re.match(r'^\s*\.if(n?def)?\b', s, re.IGNORECASE):
@@ -1065,10 +1169,13 @@ def normalize_directives(text: str, defines: dict | None = None):
             s = normalize_symbol_tokens(s)
             s = re.sub(r"\b(DCI|DCE)\s*'([^']*)'", r'\1 "\2"', s)
             s = re.sub(r'\b(DCI|DCE)\s*"', r'\1 "', s)
-            emit(s + ((" " + cmt) if cmt else ""))
             step = "Q+1" if m.group(2) == "DCI" else "Q+2"
-            emit(f"    ; Q={step}")
-            emit_redefine("Q", step, "")
+            block_lines = [
+                s + ((" " + cmt) if cmt else ""),
+                f"    ;|SRC| Q={step}",
+            ]
+            block_lines.extend(redefine_lines("Q", step, ""))
+            emit_block(block_lines, src=src_line)
             continue
 
         # ORG -> .org (and create segment)
@@ -1088,8 +1195,9 @@ def normalize_directives(text: str, defines: dict | None = None):
                     suffix += 1
                 seg_name = f"{seg_name}_{suffix}"
             used_segments.add(seg_name)
-            emit(f'    .segment "{seg_name}"')
-            s = re.sub(r'(?m)^\s*ORG\b', "    .org", s)
+            org_line = re.sub(r'(?m)^\s*ORG\b', "    .org", s)
+            emit_block([f'    .segment "{seg_name}"', org_line + ((" " + cmt) if cmt else "")], src=src_line)
+            continue
 
         # replace angle bracket grouping with parentheses (preserve <>)
         s = s.replace("<>", "__NEQ__")
@@ -1108,12 +1216,12 @@ def normalize_directives(text: str, defines: dict | None = None):
         if m:
             expr_raw = m.group(2).strip()
             if len(expr_raw.split()) >= 2 and not re.search(r"[#$()\[\],+\-*/]", expr_raw) and re.fullmatch(r"[A-Z0-9_ \t]+", expr_raw):
-                out.append("; " + s.strip())
+                append_line("; " + s.strip(), src_line)
                 continue
             lab_raw = (m.group(1) + " " if m.group(1) else "    ")
             lab = normalize_symbol_tokens(lab_raw)
             expr = normalize_symbol_tokens(preprocess_numbers(expr_raw, cur_radix))
-            emit(f"{lab}.res {expr}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab}.res {expr}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # ADR(expr) or ADR expr
@@ -1123,13 +1231,13 @@ def normalize_directives(text: str, defines: dict | None = None):
             lab_raw = (m.group(1) + " " if m.group(1) else "    ")
             lab = normalize_symbol_tokens(lab_raw)
             expr = normalize_symbol_tokens(preprocess_numbers(m.group(2).strip(), cur_radix))
-            emit(f"{lab}.word {expr}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab}.word {expr}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # LABEL: SYMBOL -> LABEL = SYMBOL (alias)
         m = re.match(r'^\s*([A-Za-z0-9_%$]+):\s*([A-Za-z0-9_%$]+)\s*$', s)
         if m and m.group(2) not in BASE_OPS and not re.fullmatch(r'[0-9]+', m.group(2)) and m.group(2).upper() not in defined_macros:
-            out.append(f"{m.group(1)} = {m.group(2)}" + ((" " + cmt) if cmt else ""))
+            append_line(f"{m.group(1)} = {m.group(2)}" + ((" " + cmt) if cmt else ""), src_line)
             continue
 
         # XWD left,right -> placeholder: two 16-bit words
@@ -1139,7 +1247,7 @@ def normalize_directives(text: str, defines: dict | None = None):
             lab = normalize_symbol_tokens(lab_raw)
             left = normalize_symbol_tokens(preprocess_numbers(m.group(2).strip(), cur_radix))
             right = normalize_symbol_tokens(preprocess_numbers(m.group(3).strip(), cur_radix))
-            emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # DC/DT string literals
@@ -1147,25 +1255,25 @@ def normalize_directives(text: str, defines: dict | None = None):
         if m:
             lab_raw = (m.group(1) + " " if m.group(1) else "    ")
             lab = normalize_symbol_tokens(lab_raw)
-            emit(f"{lab}.byte {bytes_for_string(m.group(2), True)}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab}.byte {bytes_for_string(m.group(2), True)}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
         m = re.match(r'^\s*([A-Za-z0-9_%$]+:)?\s*DC\s*\(?\'([^\']*)\'\)?\s*$', s)
         if m:
             lab_raw = (m.group(1) + " " if m.group(1) else "    ")
             lab = normalize_symbol_tokens(lab_raw)
-            emit(f"{lab}.byte {bytes_for_string(m.group(2), True)}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab}.byte {bytes_for_string(m.group(2), True)}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
         m = re.match(r'^\s*([A-Za-z0-9_%$]+:)?\s*DT\s*\(?\"([^\"]*)\"\)?\s*$', s)
         if m:
             lab_raw = (m.group(1) + " " if m.group(1) else "    ")
             lab = normalize_symbol_tokens(lab_raw)
-            emit(f"{lab}.byte {bytes_for_string(m.group(2), False)}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab}.byte {bytes_for_string(m.group(2), False)}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
         m = re.match(r'^\s*([A-Za-z0-9_%$]+:)?\s*DT\s*\(?\'([^\']*)\'\)?\s*$', s)
         if m:
             lab_raw = (m.group(1) + " " if m.group(1) else "    ")
             lab = normalize_symbol_tokens(lab_raw)
-            emit(f"{lab}.byte {bytes_for_string(m.group(2), False)}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab}.byte {bytes_for_string(m.group(2), False)}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # LABEL: numeric -> .byte
@@ -1174,7 +1282,7 @@ def normalize_directives(text: str, defines: dict | None = None):
             lab = normalize_symbol_tokens(m.group(1)) + ":"
             expr = normalize_symbol_tokens(preprocess_numbers(m.group(2).strip(), cur_radix))
             expr = clamp_byte_expr(expr)
-            emit(f"{lab} .byte {expr}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab} .byte {expr}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # LABEL: char/expression -> .byte
@@ -1182,20 +1290,20 @@ def normalize_directives(text: str, defines: dict | None = None):
         if m:
             lab = normalize_symbol_tokens(m.group(1)) + ":"
             expr = normalize_symbol_tokens(preprocess_numbers(m.group(2).strip(), cur_radix))
-            emit(f"{lab} .byte {expr}" + ((" " + cmt) if cmt else ""))
+            emit(f"{lab} .byte {expr}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # bare numeric -> .byte
         if re.match(r'^\s*[0-9\-\+\^$][0-9A-Fa-f\-\+\*/\(\) ]*$', s.strip()):
             expr = normalize_symbol_tokens(preprocess_numbers(s.strip(), cur_radix))
             expr = clamp_byte_expr(expr)
-            emit(f"    .byte {expr}" + ((" " + cmt) if cmt else ""))
+            emit(f"    .byte {expr}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # bare char/expression -> .byte
         if re.match(r'^\s*\'[^\'\\]\'', s.strip()):
             expr = normalize_symbol_tokens(preprocess_numbers(s.strip(), cur_radix))
-            emit(f"    .byte {expr}" + ((" " + cmt) if cmt else ""))
+            emit(f"    .byte {expr}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # LABEL: NAME=expr -> label applies to next emitted data line
@@ -1215,13 +1323,15 @@ def normalize_directives(text: str, defines: dict | None = None):
                 except Exception:
                     pass
             if name in redefined and name.upper() not in label_names:
-                emit_redefine(name, expr_out, cmt, consume_label=False)
+                emit_redefine(name, expr_out, cmt, consume_label=False, src=src_line)
             else:
-                emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
+                emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False, src=src_line)
             if name == "REALIO" and not added_iscntc_import:
-                emit("    .if (REALIO-5) = 0", consume_label=False)
-                emit("        .import ISCNTC", consume_label=False)
-                emit("    .endif", consume_label=False)
+                emit_block(
+                    ["    .if (REALIO-5) = 0", "        .import ISCNTC", "    .endif"],
+                    consume_label_first=False,
+                    src=src_line,
+                )
                 added_iscntc_import = True
             seen_names.add(name)
             continue
@@ -1242,13 +1352,15 @@ def normalize_directives(text: str, defines: dict | None = None):
                 except Exception:
                     pass
             if name in redefined and name.upper() not in label_names:
-                emit_redefine(name, expr_out, cmt)
+                emit_redefine(name, expr_out, cmt, src=src_line)
             else:
-                emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""))
+                emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""), src=src_line)
             if name == "REALIO" and not added_iscntc_import:
-                emit("    .if (REALIO-5) = 0", consume_label=False)
-                emit("        .import ISCNTC", consume_label=False)
-                emit("    .endif", consume_label=False)
+                emit_block(
+                    ["    .if (REALIO-5) = 0", "        .import ISCNTC", "    .endif"],
+                    consume_label_first=False,
+                    src=src_line,
+                )
                 added_iscntc_import = True
             seen_names.add(name)
             continue
@@ -1258,14 +1370,16 @@ def normalize_directives(text: str, defines: dict | None = None):
         if m and not re.fullmatch(r'[0-9]+', m.group(2)) and m.group(2) not in BASE_OPS and m.group(2).upper() not in defined_macros:
             left = normalize_symbol_tokens(m.group(1))
             right = normalize_symbol_tokens(m.group(2))
-            emit(f"{left} = {right}" + ((" " + cmt) if cmt else ""))
+            emit(f"{left} = {right}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # long-branch fixup for BEQ EXP (out of range under ca65)
         m = re.match(r'^(\s*(?:[A-Za-z0-9_%$]+:\s*)?)BEQ\s+EXP\s*$', s)
         if m:
-            emit(f"{m.group(1)}BNE *+3" + ((" " + cmt) if cmt else ""))
-            emit("    JMP EXP")
+            emit_block(
+                [f"{m.group(1)}BNE *+3" + ((" " + cmt) if cmt else ""), "    JMP EXP"],
+                src=src_line,
+            )
             continue
 
         if ror_stack and ror_stack[-1]:
@@ -1286,12 +1400,13 @@ def normalize_directives(text: str, defines: dict | None = None):
             s = replace_bang_or(s)
             s = clamp_immediate_expr(s)
             s = fix_zero_page_minus_one(s)
-            emit(s + ((" " + cmt) if cmt else ""))
+            emit(s + ((" " + cmt) if cmt else ""), src=src_line)
         else:
             s = fix_zero_page_minus_one(s)
-            emit(s + ((" " + cmt) if cmt else ""))
             if alias_restor:
-                emit("RESTORE = RESTOR")
+                emit_block([s + ((" " + cmt) if cmt else ""), "RESTORE = RESTOR"], src=src_line)
+            else:
+                emit(s + ((" " + cmt) if cmt else ""), src=src_line)
 
         if re.match(r'^\s*\.macro\b', s, re.IGNORECASE):
             macro_depth += 1
@@ -1341,7 +1456,7 @@ def convert(src_text: str):
     sym.update(config)
     stage1 = expand_exp_lines(stage0, sym)
     stage2 = normalize_instruction_macros(stage1)
-    stage3 = normalize_directives(stage2, defines)
+    stage3 = normalize_directives(stage2, defines, annotate=True)
     helper = (
         "; ca65 helper macros for converted source\n"
         ".macro DC S,\n"
@@ -1360,6 +1475,13 @@ def convert(src_text: str):
         ".endmacro\n"
         "\n"
     )
+    helper_lines = []
+    for line in helper.splitlines():
+        if line.strip() == "":
+            helper_lines.append("")
+        else:
+            helper_lines.append(f"{line} ;|SRC| (generated)")
+    helper = "\n".join(helper_lines) + "\n"
     return helper + stage3, defines
 
 def find_unresolved(text: str):
