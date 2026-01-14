@@ -696,6 +696,8 @@ def comment_if_plain_text_line(line: str) -> str:
 
     if t.startswith("DC") or t.startswith("DT"):
         return line
+    if re.match(r'^ADR\s*\(', t):
+        return line
 
     def has_opcode_punct(text: str) -> bool:
         return bool(re.search(r"[#$()\[\],]", text))
@@ -1242,6 +1244,7 @@ def normalize_directives(text: str, defines: dict | None = None):
         s = replace_bang_or(s)
         s = s.replace(":|", ":")
         s = re.sub(r'^(\s*)ZSTORD:', r'\1ZSTORDO:', s)
+        alias_restor = bool(re.match(r'^\s*RESTOR:', s))
         s = clamp_immediate_expr(s)
         if macro_depth > 0:
             s = preprocess_numbers(s, cur_radix)
@@ -1253,6 +1256,8 @@ def normalize_directives(text: str, defines: dict | None = None):
         else:
             s = fix_zero_page_minus_one(s)
             emit(s + ((" " + cmt) if cmt else ""))
+            if alias_restor:
+                emit("RESTORE = RESTOR")
 
         if re.match(r'^\s*\.macro\b', s, re.IGNORECASE):
             macro_depth += 1
