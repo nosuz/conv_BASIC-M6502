@@ -226,7 +226,8 @@ def convert_defines_to_macros(text: str):
             safe_params.append(new_p)
             used.add(new_p)
         params = safe_params
-        defines[name] = {"params": params, "body": body, "start": m.start(), "end": end_pos}
+        orig_text = text[m.start():end_pos]
+        defines[name] = {"params": params, "body": body, "start": m.start(), "end": end_pos, "orig": orig_text}
 
         indent = re.match(r"[ \t]*", text[m.start():]).group(0)
         macro_head = f"{indent}.macro {name}"
@@ -264,7 +265,15 @@ def convert_defines_to_macros(text: str):
                     break
             body_lines.insert(0, f"{body_indent}.local __Q")
             body_text = "\n".join(body_lines)
-        macro_text = f"{macro_head}\n{body_text.rstrip()}\n{indent}.endmacro\n"
+        orig_lines = orig_text.splitlines()
+        commented = []
+        for ln_ in orig_lines:
+            if ln_.strip():
+                commented.append(f"{indent}; {ln_.rstrip()}")
+            else:
+                commented.append(f"{indent};")
+        comment_block = "\n".join(commented) + "\n"
+        macro_text = f"{comment_block}{macro_head}\n{body_text.rstrip()}\n{indent}.endmacro\n"
 
         out.append(text[last:m.start()])
         out.append(macro_text)
@@ -701,7 +710,7 @@ def comment_if_plain_text_line(line: str) -> str:
 
     return line
 
-def normalize_directives(text: str):
+def normalize_directives(text: str, defines: dict | None = None):
     out = []
     defined_macros = set()
     seen_names = set()
@@ -878,13 +887,43 @@ def normalize_directives(text: str):
     }
 
     for ln_ in nl(text).splitlines():
-        ln_ = comment_if_plain_text_line(ln_)
+        if defines:
+            code = ln_.split(";", 1)[0]
+            rest = code.strip()
+            mlabel = re.match(r'^([A-Za-z0-9_%$]+):\s*(.*)$', rest)
+            if mlabel:
+                rest = mlabel.group(2).strip()
+            mcall = re.match(r'^([A-Za-z0-9_%$]+)\b', rest)
+            if mcall and mcall.group(1).upper() in defines:
+                pass
+            else:
+                ln_ = comment_if_plain_text_line(ln_)
+        else:
+            ln_ = comment_if_plain_text_line(ln_)
         code, *comment = ln_.split(";", 1)
         cmt = ";" + comment[0] if comment else ""
         s = code.rstrip()
         if not s.strip():
             out.append(ln_)
             continue
+        if defines and macro_depth == 0:
+            rest = s.strip()
+            mlabel = re.match(r'^([A-Za-z0-9_%$]+):\s*(.*)$', rest)
+            if mlabel:
+                rest = mlabel.group(2).strip()
+            mcall = re.match(r'^([A-Za-z0-9_%$]+)\b', rest)
+            if mcall:
+                op = mcall.group(1).upper()
+                if op in defines:
+                    params = defines[op].get("params") or []
+                    sig = f"DEFINE {op}"
+                    if params:
+                        sig += "(" + ",".join(params) + ")"
+                    parts = []
+                    if cmt:
+                        parts.append(cmt.lstrip(";").strip())
+                    parts.append(sig)
+                    cmt = "; " + " ; ".join(parts)
         if not preamble_emitted:
             for ln_ in predefine:
                 if ln_.split()[1] == "Q":
@@ -935,6 +974,14 @@ def normalize_directives(text: str):
             s = re.sub(r'(?<![A-Z0-9_%$])\.(?=[+-])', "*", s)
             s = clamp_immediate_expr(s)
             s = fix_zero_page_minus_one(s)
+            m_xwd = re.match(r'^\s*([A-Za-z0-9_%$]+:)?\s*XWD\s+([^,]+)\s*,\s*(.+)$', s)
+            if m_xwd:
+                lab_raw = (m_xwd.group(1) + " " if m_xwd.group(1) else "    ")
+                lab = normalize_symbol_tokens(lab_raw)
+                left = m_xwd.group(2).strip()
+                right = m_xwd.group(3).strip()
+                emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""))
+                continue
             stripped = s.strip()
             if re.fullmatch(r'[0-9\-\+\^$][0-9A-Fa-f\-\+\*/\(\) ]*', stripped):
                 indent = re.match(r"^\s*", s).group(0)
@@ -1197,7 +1244,7 @@ def convert(src_text: str):
     sym.update(config)
     stage1 = expand_exp_lines(stage0, sym)
     stage2 = normalize_instruction_macros(stage1)
-    stage3 = normalize_directives(stage2)
+    stage3 = normalize_directives(stage2, defines)
     helper = (
         "; ca65 helper macros for converted source\n"
         ".macro DC S,\n"
