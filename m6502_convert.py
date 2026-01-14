@@ -232,6 +232,7 @@ def convert_defines_to_macros(text: str, skip_names: set | None = None):
             continue
         params = m.group(2)
         params = [p.strip() for p in params.strip()[1:-1].split(",") if p.strip()] if params else []
+        out_name = "RORW" if name.upper() == "ROR" else name
         param_map = {}
         safe_params = []
         used = set()
@@ -249,10 +250,17 @@ def convert_defines_to_macros(text: str, skip_names: set | None = None):
             used.add(new_p)
         params = safe_params
         orig_text = text[m.start():end_pos]
-        defines[name] = {"params": params, "body": body, "start": m.start(), "end": end_pos, "orig": orig_text}
+        defines[out_name] = {
+            "params": params,
+            "body": body,
+            "start": m.start(),
+            "end": end_pos,
+            "orig": orig_text,
+            "orig_name": name,
+        }
 
         indent = re.match(r"[ \t]*", text[m.start():]).group(0)
-        macro_head = f"{indent}.macro {name}"
+        macro_head = f"{indent}.macro {out_name}"
         if params:
             if len(params) == 1:
                 macro_head += " " + params[0] + ","
@@ -745,6 +753,7 @@ def normalize_directives(text: str, defines: dict | None = None):
     pending_label = None
     defined_names = set()
     cond_stack = []
+    ror_stack = []
     macro_depth = 0
     preamble_emitted = False
     sym_values = {}
@@ -955,7 +964,8 @@ def normalize_directives(text: str, defines: dict | None = None):
                 op = mcall.group(1).upper()
                 if op in defines:
                     params = defines[op].get("params") or []
-                    sig = f"DEFINE {op}"
+                    sig_name = defines[op].get("orig_name", op)
+                    sig = f"DEFINE {sig_name}"
                     if params:
                         sig += "(" + ",".join(params) + ")"
                     parts = []
@@ -1239,6 +1249,11 @@ def normalize_directives(text: str, defines: dict | None = None):
             emit("    JMP EXP")
             continue
 
+        if ror_stack and ror_stack[-1]:
+            m_ror = re.match(r'^(\s*(?:[A-Za-z0-9_%$]+:\s*)?)ROR\b(.*)$', s)
+            if m_ror:
+                s = f"{m_ror.group(1)}RORW{m_ror.group(2)}"
+
         s = preprocess_numbers(s, cur_radix)
         s = normalize_symbol_tokens(s)
         s = replace_bang_or(s)
@@ -1265,12 +1280,18 @@ def normalize_directives(text: str, defines: dict | None = None):
             macro_depth = max(0, macro_depth - 1)
         if re.match(r'^\s*\.if(n?def)?\b', s, re.IGNORECASE):
             cond_stack.append(set())
+            ror_on = bool(re.search(r'\bRORSW\b', s) and re.search(r'=\s*0', s))
+            ror_stack.append(ror_on)
         elif re.match(r'^\s*\.else(if)?\b', s, re.IGNORECASE):
             if cond_stack:
                 cond_stack[-1].clear()
+            if ror_stack:
+                ror_stack[-1] = False
         elif re.match(r'^\s*\.endif\b', s, re.IGNORECASE):
             if cond_stack:
                 cond_stack.pop()
+            if ror_stack:
+                ror_stack.pop()
     return "\n".join(out) + "\n"
 
 def build_sym_table(src: str, first_only: bool = False):
@@ -1294,7 +1315,7 @@ def convert(src_text: str):
     src_text = nl(src_text)
     config = extract_config_overrides(src_text)
     stage0 = convert_conditionals_to_ca65(src_text)
-    stage0, defines = convert_defines_to_macros(stage0, skip_names={"ROR"})
+    stage0, defines = convert_defines_to_macros(stage0)
     stage0 = convert_repeat_to_ca65(stage0)
     stage0 = convert_irpc_to_ca65(stage0)
     sym = build_sym_table(stage0)
