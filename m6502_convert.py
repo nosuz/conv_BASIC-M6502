@@ -50,7 +50,7 @@ def parse_conditional_block(s: str, start: int):
         if c == "<":
             line_start = s.rfind("\n", 0, i) + 1
             prefix = s[line_start:i]
-            if re.match(r'^\s*(?:[A-Z0-9_%$]+:\s*)?(IFE|IFN|IF1)\b[^<]*,\s*$', prefix, re.IGNORECASE):
+            if re.match(r'^\s*(?:[A-Z0-9_%$]+:\s*)?(IFE|IFN|IF1|IF2)\b[^<]*,\s*$', prefix, re.IGNORECASE):
                 depth += 1
                 i += 1
                 continue
@@ -70,7 +70,7 @@ def extract_config_overrides(src_text: str):
         code = line.split(";", 1)[0].strip()
         if not code:
             continue
-        if re.match(r'^(?:[A-Z0-9_%$]+:\s*)?(IFE|IFN|IF1)\b', code, re.IGNORECASE):
+        if re.match(r'^(?:[A-Z0-9_%$]+:\s*)?(IFE|IFN|IF1|IF2)\b', code, re.IGNORECASE):
             break
         m = re.match(r'^([A-Z0-9_%$]+)\s*(==|=)\s*(.+)$', code)
         if not m:
@@ -199,8 +199,81 @@ def remove_spans(full: str, spans):
     out.append(full[last:])
     return "".join(out)
 
+def convert_defines_to_macros(text: str):
+    pat = re.compile(r'(?m)^\s*DEFINE\s+([A-Z0-9_%$]+)\s*(\([^)]*\))?\s*,\s*<')
+    out = []
+    last = 0
+    defines = {}
+    reserved_param_names = {"A", "X", "Y"}
+    for m in pat.finditer(text):
+        name = m.group(1)
+        params = m.group(2)
+        params = [p.strip() for p in params.strip()[1:-1].split(",") if p.strip()] if params else []
+        body, end_pos = parse_balanced_angle(text, m.end() - 1)
+        param_map = {}
+        safe_params = []
+        used = set()
+        for p in params:
+            new_p = p
+            if p.upper() in reserved_param_names:
+                base = f"ARG_{p.upper()}"
+                new_p = base
+                suffix = 2
+                while new_p in used or new_p in params:
+                    new_p = f"{base}_{suffix}"
+                    suffix += 1
+            param_map[p] = new_p
+            safe_params.append(new_p)
+            used.add(new_p)
+        params = safe_params
+        defines[name] = {"params": params, "body": body, "start": m.start(), "end": end_pos}
+
+        indent = re.match(r"[ \t]*", text[m.start():]).group(0)
+        macro_head = f"{indent}.macro {name}"
+        if params:
+            if len(params) == 1:
+                macro_head += " " + params[0] + ","
+            else:
+                macro_head += " " + ", ".join(params)
+
+        body_text = body
+        if body_text.startswith("\n"):
+            body_text = body_text[1:]
+        if name in ("DCI", "DCE"):
+            body_lines = body_text.splitlines()
+            body_lines = [
+                ln_ for ln_ in body_lines
+                if not re.match(r'^\s*Q\s*=\s*Q\s*\+\s*\d+\s*$', ln_)
+            ]
+            body_text = "\n".join(body_lines)
+            body_text = re.sub(r'\bDC\(([^)]+)\)', r'DC \1', body_text)
+        for old, new in param_map.items():
+            if old != new:
+                body_text = re.sub(
+                    rf'(?<![A-Za-z0-9_%$]){re.escape(old)}(?![A-Za-z0-9_%$])',
+                    new,
+                    body_text,
+                )
+        if "%Q" in body_text:
+            body_text = body_text.replace("%Q", "__Q")
+            body_lines = body_text.splitlines()
+            body_indent = ""
+            for ln_ in body_lines:
+                if ln_.strip():
+                    body_indent = re.match(r"[ \t]*", ln_).group(0)
+                    break
+            body_lines.insert(0, f"{body_indent}.local __Q")
+            body_text = "\n".join(body_lines)
+        macro_text = f"{macro_head}\n{body_text.rstrip()}\n{indent}.endmacro\n"
+
+        out.append(text[last:m.start()])
+        out.append(macro_text)
+        last = end_pos
+    out.append(text[last:])
+    return "".join(out), defines
+
 # ---- conditionals ----
-COND_PAT = re.compile(r'(?m)^[ \t]*(?:([A-Z0-9_%$]+):[ \t]*)?(IFE|IFN|IF1)[ \t]*([^\n]*?)\s*,\s*<', re.IGNORECASE)
+COND_PAT = re.compile(r'(?m)^[ \t]*(?:([A-Z0-9_%$]+):[ \t]*)?(IFE|IFN|IF1|IF2|IFDEF|IFNDEF)\b[ \t]*([^\n]*?)\s*,\s*<', re.IGNORECASE)
 
 def expand_conditionals(text: str, sym: dict, pass_num: int = 2, max_iters: int = 8000):
     out = text
@@ -210,8 +283,12 @@ def expand_conditionals(text: str, sym: dict, pass_num: int = 2, max_iters: int 
             break
         label, kind, expr = m.group(1), m.group(2).upper(), m.group(3).strip()
         block, end_pos = parse_conditional_block(out, m.end() - 1)
-        if kind == "IF1":
+        if kind in ("IF1", "IF2"):
             include = (pass_num == 1)
+        elif kind in ("IFDEF", "IFNDEF"):
+            key = expr.strip()
+            is_def = key in sym
+            include = is_def if kind == "IFDEF" else (not is_def)
         else:
             try:
                 val = safe_eval_int(expr, sym)
@@ -236,6 +313,47 @@ def strip_conditionals(text: str, max_iters: int = 8000):
             break
         _block, end_pos = parse_conditional_block(out, m.end() - 1)
         out = out[:m.start()] + out[end_pos:]
+    return out
+
+def convert_conditionals_to_ca65(text: str, max_iters: int = 8000):
+    out = text
+    for _ in range(max_iters):
+        m = COND_PAT.search(out)
+        if not m:
+            break
+        label, kind, expr = m.group(1), m.group(2).upper(), m.group(3).strip()
+        block, end_pos = parse_conditional_block(out, m.end() - 1)
+        block = convert_conditionals_to_ca65(block, max_iters=max_iters)
+        if label and block.strip():
+            bl = block.splitlines()
+            for i, ln_ in enumerate(bl):
+                if ln_.strip():
+                    bl[i] = f"{label}: {ln_.lstrip()}"
+                    break
+            block = "\n".join(bl)
+
+        line_start = out.rfind("\n", 0, m.start()) + 1
+        leading_ws = re.match(r"[ \t]*", out[line_start:]).group(0)
+
+        comment = ""
+        if kind == "IFE":
+            cond = f"({expr}) = 0"
+        elif kind == "IFN":
+            cond = f"({expr}) <> 0"
+        elif kind == "IFDEF":
+            cond = f".defined({expr})"
+        elif kind == "IFNDEF":
+            cond = f".not .defined({expr})"
+        else:  # IF1/IF2
+            cond = "1"
+            comment = f" ; {kind} (pass1 only in original)"
+
+        parts = [f"{leading_ws}.if {cond}{comment}"]
+        if block:
+            parts.append(block.rstrip("\n"))
+        parts.append(f"{leading_ws}.endif")
+        repl = "\n".join(parts) + "\n"
+        out = out[:m.start()] + repl + out[end_pos:]
     return out
 
 # ---- REPEAT ----
@@ -263,6 +381,29 @@ def expand_repeat(text: str, sym: dict, max_iters: int = 2000):
                     break
             block = "\n".join(bl)
         out = out[:m.start()] + block + out[end_pos:]
+    return out
+
+def convert_repeat_to_ca65(text: str, max_iters: int = 2000):
+    out = text
+    for _ in range(max_iters):
+        m = REPEAT_PAT.search(out)
+        if not m:
+            break
+        label = m.group(1)
+        count_expr = m.group(2).strip()
+        body, end_pos = parse_balanced_angle(out, m.end() - 1)
+        body = convert_repeat_to_ca65(body, max_iters=max_iters)
+        line_start = out.rfind("\n", 0, m.start()) + 1
+        leading_ws = re.match(r"[ \t]*", out[line_start:]).group(0)
+        repeat_line = f"{leading_ws}.repeat {count_expr}"
+        if label:
+            repeat_line = f"{leading_ws}{label}: {repeat_line.lstrip()}"
+        parts = [repeat_line]
+        if body.strip():
+            parts.append(body.rstrip("\n"))
+        parts.append(f"{leading_ws}.endrepeat")
+        repl = "\n".join(parts) + "\n"
+        out = out[:m.start()] + repl + out[end_pos:]
     return out
 
 # ---- DEFINE expansion ----
@@ -335,6 +476,7 @@ def expand_define_macros(text: str, defines: dict, max_depth: int = 120):
 
 # ---- IRPC "STRING",<...> -> .byte ASCII ----
 IRPC2_PAT = re.compile(r'(?m)^(\s*(?:[A-Z0-9_%$]+:\s*)?)IRPC\s+"([^"]*)"\s*,\s*<')
+IRPC_PAT = re.compile(r'(?m)^\s*(?:([A-Z0-9_%$]+):\s*)?IRPC\s+([A-Z0-9_%$]+)\s*,\s*<')
 
 def expand_irpc_string_only(text: str):
     out = text
@@ -347,6 +489,47 @@ def expand_irpc_string_only(text: str):
         _body, end_pos = parse_balanced_angle(out, m.end() - 1)
         bytes_list = ",".join(f"${ord(ch) & 0xFF:02X}" for ch in s)
         repl = f"{prefix}.byte {bytes_list}"
+        out = out[:m.start()] + repl + out[end_pos:]
+    return out
+
+def convert_irpc_to_ca65(text: str, max_iters: int = 2000):
+    out = text
+    uniq = 0
+    for _ in range(max_iters):
+        m = IRPC_PAT.search(out)
+        if not m:
+            break
+        label = m.group(1)
+        var = m.group(2)
+        body, end_pos = parse_balanced_angle(out, m.end() - 1)
+        body = convert_irpc_to_ca65(body, max_iters=max_iters)
+        uniq += 1
+        idx = f"__IRPCI_{uniq}"
+        new_lines = []
+        for ln_ in nl(body).splitlines():
+            if re.match(r'^\s*IFDIF\b', ln_, re.IGNORECASE):
+                pat = re.compile(
+                    rf'^\s*IFDIF\s+<\s*{re.escape(var)}\s*>\s*<\s*"\s*>\s*,\s*<\s*EXP\s+"{re.escape(var)}"\s*>\s*$',
+                    re.IGNORECASE,
+                )
+                if pat.match(ln_.strip()):
+                    leading_ws = re.match(r"[ \t]*", ln_).group(0)
+                    new_lines.append(f"{leading_ws}.if .not .match (.strat ({var}, {idx}), '\"')")
+                    new_lines.append(f"{leading_ws}    .byte .strat ({var}, {idx})")
+                    new_lines.append(f"{leading_ws}.endif")
+                    continue
+            new_lines.append(ln_)
+        body = "\n".join(new_lines)
+        line_start = out.rfind("\n", 0, m.start()) + 1
+        leading_ws = re.match(r"[ \t]*", out[line_start:]).group(0)
+        repeat_line = f"{leading_ws}.repeat .strlen ({var}), {idx}"
+        if label:
+            repeat_line = f"{leading_ws}{label}: {repeat_line.lstrip()}"
+        parts = [repeat_line]
+        if body.strip():
+            parts.append(body.rstrip("\n"))
+        parts.append(f"{leading_ws}.endrepeat")
+        repl = "\n".join(parts) + "\n"
         out = out[:m.start()] + repl + out[end_pos:]
     return out
 
@@ -491,7 +674,7 @@ def comment_if_plain_text_line(line: str) -> str:
 
     # opcode / pseudo that might start a line
     first = t.split()[0]
-    if first in BASE_OPS or first in ("ORG","BLOCK","ADR","XWD","DEFINE","IFE","IFN","IF1","REPEAT","IRPC","EXP","IFDIF","DC","DT","RADIX"):
+    if first in BASE_OPS or first in ("ORG","BLOCK","ADR","XWD","DEFINE","IFE","IFN","IF1","IF2","REPEAT","IRPC","EXP","IFDIF","DC","DT","RADIX"):
         if len(t.split()) >= 3 and not has_opcode_punct(t) and looks_like_prose(t):
             return "; " + t
         if first in BASE_OPS and len(t.split()) > 2 and not re.search(r"[#$()]", t):
@@ -523,6 +706,10 @@ def normalize_directives(text: str):
     defined_macros = set()
     seen_names = set()
     pending_label = None
+    defined_names = set()
+    cond_stack = []
+    macro_depth = 0
+    preamble_emitted = False
     sym_values = {}
     cur_radix = 10
     redefined = set()
@@ -531,6 +718,9 @@ def normalize_directives(text: str):
         code = ln_.split(";", 1)[0].strip()
         if not code:
             continue
+        m = re.match(r'^\s*\.macro\s+([A-Za-z0-9_%$]+)\b', code, re.IGNORECASE)
+        if m:
+            defined_macros.add(m.group(1).upper())
         m = re.match(r'^\s*([A-Za-z0-9_%$]+):\s*([A-Za-z0-9_%$]+)\s*(==|=)\s*', code)
         if m:
             counts[m.group(2)] = counts.get(m.group(2), 0) + 1
@@ -563,7 +753,7 @@ def normalize_directives(text: str):
                 out.append(c)
                 i += 1
                 continue
-            m = re.match(r"[A-Z0-9_%$]+", s[i:])
+            m = re.match(r"[A-Za-z0-9_%$]+", s[i:])
             if not m:
                 out.append(c)
                 i += 1
@@ -572,10 +762,27 @@ def normalize_directives(text: str):
             if tok.startswith("$") and re.fullmatch(r"\$[0-9A-F]+", tok):
                 out.append(tok)
             elif "$" in tok:
-                out.append(tok.replace("$", "DOLLAR"))
+                out.append(tok.replace("$", "DOLLAR").upper())
             else:
-                out.append(tok)
+                out.append(tok.upper())
             i += len(tok)
+        return "".join(out)
+
+    def replace_bang_or(s: str) -> str:
+        out = []
+        in_quote = None
+        for c in s:
+            if c in ("'", '"'):
+                if in_quote is None:
+                    in_quote = c
+                elif in_quote == c:
+                    in_quote = None
+                out.append(c)
+                continue
+            if in_quote:
+                out.append(c)
+                continue
+            out.append("|" if c == "!" else c)
         return "".join(out)
 
     def bytes_for_string(s: str, set_high_bit_last: bool) -> str:
@@ -621,8 +828,10 @@ def normalize_directives(text: str):
     def clamp_immediate_expr(line: str) -> str:
         def repl(m):
             expr = m.group(1)
-            if re.fullmatch(r"\$[0-9A-F]+", expr) or re.fullmatch(r"[0-9]+", expr) or re.fullmatch(r"[A-Z0-9_%$]+", expr):
+            if re.fullmatch(r"\$[0-9A-F]+", expr) or re.fullmatch(r"[0-9]+", expr):
                 return "#" + expr
+            if re.fullmatch(r"[A-Z0-9_%$]+", expr):
+                return f"#(({expr}) & $FF)"
             if re.fullmatch(r"'[^']'", expr):
                 return "#" + expr
             if not re.search(r"[-+*/&|^()]", expr):
@@ -639,6 +848,35 @@ def normalize_directives(text: str):
             return m.group(0)
         return re.sub(r"\b([A-Za-z0-9_%$]+)-1,([XY])\b", repl, line)
 
+    def emit_redefine(name: str, expr_out: str, cmt: str, consume_label: bool = False):
+        needs_temp = bool(re.search(rf'(?<![A-Za-z0-9_%$]){re.escape(name)}(?![A-Za-z0-9_%$])', expr_out))
+        if name in defined_names:
+            if needs_temp:
+                tmp = f"__{name}_TMP"
+                emit(f"    .define {tmp} {name}", consume_label=consume_label)
+                emit(f"    .undef {name}", consume_label=False)
+                expr_out = re.sub(
+                    rf'(?<![A-Za-z0-9_%$]){re.escape(name)}(?![A-Za-z0-9_%$])',
+                    tmp,
+                    expr_out,
+                )
+                emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
+                emit(f"    .undef {tmp}", consume_label=False)
+                defined_names.add(name)
+                return
+            emit(f"    .undef {name}", consume_label=consume_label)
+        emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=consume_label)
+        defined_names.add(name)
+
+    predefine = [f"    .define {name} 0" for name in sorted(redefined) if name != "Q"]
+
+    allowed_dot = {
+        "org","byte","word","res","include","segment","proc","endproc","export","import",
+        "scope","endscope","setcpu","ifdef","ifndef","if","else","elseif","endif","repeat","endrepeat",
+        "macro","endmacro","local","endlocal","assert","align","asciiz","ascii","bank","define","undef",
+        "exitmacro","set",
+    }
+
     for ln_ in nl(text).splitlines():
         ln_ = comment_if_plain_text_line(ln_)
         code, *comment = ln_.split(";", 1)
@@ -647,13 +885,25 @@ def normalize_directives(text: str):
         if not s.strip():
             out.append(ln_)
             continue
+        if not preamble_emitted:
+            for ln_ in predefine:
+                if ln_.split()[1] == "Q":
+                    continue
+                out.append(ln_)
+                defined_names.add(ln_.split()[1])
+            preamble_emitted = True
         s = replace_char_literals(s)
         s = fix_trailing_commas_in_op(s)
+        s = re.sub(r'(^|[ \t:])([A-Z][A-Z0-9_%$]+)"', r'\1\2 "', s)
 
         # comment out dot directives like .CREF/.XCREF and "..." pseudo
-        if re.match(r'^\s*\.\w+', s) or re.match(r'^\s*\.\.\.', s):
-            out.append("; " + s.strip())
-            continue
+        m_dot = re.match(r'^\s*\.(\w+)', s)
+        if m_dot or re.match(r'^\s*\.\.\.', s):
+            if m_dot and m_dot.group(1).lower() in allowed_dot:
+                pass
+            else:
+                out.append("; " + s.strip())
+                continue
 
         # listing/meta directives become comments
         if re.match(r'^\s*(TITLE|SUBTTL|PAGE|COMMENT|SALL|SEARCH)\b', s):
@@ -674,11 +924,59 @@ def normalize_directives(text: str):
             out.append("; " + s.strip())
             continue
 
+        if macro_depth > 0 and not re.match(r'^\s*\.endmacro\b', s, re.IGNORECASE):
+            s = preprocess_numbers(s, cur_radix)
+            s = normalize_symbol_tokens(s)
+            s = replace_bang_or(s)
+            s = s.replace("<>", "__NEQ__")
+            s = s.replace("<", "(").replace(">", ")")
+            s = s.replace("__NEQ__", "<>")
+            s = re.sub(r'\(([^),]+)\)\s*([+\-])', r'\1\2', s)
+            s = re.sub(r'(?<![A-Z0-9_%$])\.(?=[+-])', "*", s)
+            s = clamp_immediate_expr(s)
+            s = fix_zero_page_minus_one(s)
+            stripped = s.strip()
+            if re.fullmatch(r'[0-9\-\+\^$][0-9A-Fa-f\-\+\*/\(\) ]*', stripped):
+                indent = re.match(r"^\s*", s).group(0)
+                expr = clamp_byte_expr(stripped)
+                emit(f"{indent}.byte {expr}" + ((" " + cmt) if cmt else ""))
+                continue
+            if re.fullmatch(r"'[^'\\]'", stripped):
+                indent = re.match(r"^\s*", s).group(0)
+                emit(f"{indent}.byte {stripped}" + ((" " + cmt) if cmt else ""))
+                continue
+            emit(s + ((" " + cmt) if cmt else ""))
+            if re.match(r'^\s*\.macro\b', s, re.IGNORECASE):
+                macro_depth += 1
+            if re.match(r'^\s*\.if(n?def)?\b', s, re.IGNORECASE):
+                cond_stack.append(set())
+            elif re.match(r'^\s*\.else(if)?\b', s, re.IGNORECASE):
+                if cond_stack:
+                    cond_stack[-1].clear()
+            elif re.match(r'^\s*\.endif\b', s, re.IGNORECASE):
+                if cond_stack:
+                    cond_stack.pop()
+            continue
+
+        m = re.match(r'^\s*([A-Za-z0-9_%$]+:)?\s*(DCI|DCE)\b(.*)$', s)
+        if m and macro_depth == 0:
+            s = preprocess_numbers(s, cur_radix)
+            s = normalize_symbol_tokens(s)
+            s = re.sub(r"\b(DCI|DCE)\s*'([^']*)'", r'\1 "\2"', s)
+            s = re.sub(r'\b(DCI|DCE)\s*"', r'\1 "', s)
+            emit(s + ((" " + cmt) if cmt else ""))
+            step = "Q+1" if m.group(2) == "DCI" else "Q+2"
+            emit(f"    ; Q={step}")
+            emit_redefine("Q", step, "")
+            continue
+
         # ORG -> .org
         s = re.sub(r'(?m)^\s*ORG\b', "    .org", s)
 
-        # replace angle bracket grouping with parentheses
+        # replace angle bracket grouping with parentheses (preserve <>)
+        s = s.replace("<>", "__NEQ__")
         s = s.replace("<", "(").replace(">", ")")
+        s = s.replace("__NEQ__", "<>")
         s = re.sub(r'\(([^),]+)\)\s*([+\-])', r'\1\2', s)
 
         # convert .+ / .- to ca65 PC-relative syntax
@@ -712,7 +1010,7 @@ def normalize_directives(text: str):
 
         # LABEL: SYMBOL -> LABEL = SYMBOL (alias)
         m = re.match(r'^\s*([A-Za-z0-9_%$]+):\s*([A-Za-z0-9_%$]+)\s*$', s)
-        if m and m.group(2) not in BASE_OPS and not re.fullmatch(r'[0-9]+', m.group(2)):
+        if m and m.group(2) not in BASE_OPS and not re.fullmatch(r'[0-9]+', m.group(2)) and m.group(2).upper() not in defined_macros:
             out.append(f"{m.group(1)} = {m.group(2)}" + ((" " + cmt) if cmt else ""))
             continue
 
@@ -799,28 +1097,9 @@ def normalize_directives(text: str):
                 except Exception:
                     pass
             if name in redefined:
-                if name in defined_macros:
-                    emit(f"    .undef {name}", consume_label=False)
-                defined_macros.add(name)
-                emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
-            elif unknown:
-                if name in seen_names and name not in defined_macros:
-                    emit(f"    .undef {name}", consume_label=False)
-                    defined_macros.add(name)
-                    emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
-                else:
-                    emit(f"    {name} = {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
+                emit_redefine(name, expr_out, cmt, consume_label=False)
             else:
-                if name in defined_macros:
-                    emit(f"    .undef {name}", consume_label=False)
-                    defined_macros.add(name)
-                    emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
-                elif name in seen_names:
-                    emit(f"    .undef {name}", consume_label=False)
-                    defined_macros.add(name)
-                    emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
-                else:
-                    emit(f"    {name} = {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
+                emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
             seen_names.add(name)
             continue
 
@@ -840,34 +1119,15 @@ def normalize_directives(text: str):
                 except Exception:
                     pass
             if name in redefined:
-                if name in defined_macros:
-                    emit(f"    .undef {name}")
-                defined_macros.add(name)
-                emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""))
-            elif unknown:
-                if name in seen_names and name not in defined_macros:
-                    emit(f"    .undef {name}")
-                    defined_macros.add(name)
-                    emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""))
-                else:
-                    emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""))
+                emit_redefine(name, expr_out, cmt)
             else:
-                if name in defined_macros:
-                    emit(f"    .undef {name}")
-                    defined_macros.add(name)
-                    emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""))
-                elif name in seen_names:
-                    emit(f"    .undef {name}")
-                    defined_macros.add(name)
-                    emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""))
-                else:
-                    emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""))
+                emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""))
             seen_names.add(name)
             continue
 
         # LABEL: SYMBOL -> LABEL = SYMBOL (alias)
         m = re.match(r'^\s*([A-Za-z0-9_%$]+):\s*([A-Za-z0-9_%$]+)\s*$', s)
-        if m and not re.fullmatch(r'[0-9]+', m.group(2)) and m.group(2) not in BASE_OPS:
+        if m and not re.fullmatch(r'[0-9]+', m.group(2)) and m.group(2) not in BASE_OPS and m.group(2).upper() not in defined_macros:
             left = normalize_symbol_tokens(m.group(1))
             right = normalize_symbol_tokens(m.group(2))
             emit(f"{left} = {right}" + ((" " + cmt) if cmt else ""))
@@ -882,9 +1142,31 @@ def normalize_directives(text: str):
 
         s = preprocess_numbers(s, cur_radix)
         s = normalize_symbol_tokens(s)
+        s = replace_bang_or(s)
         s = clamp_immediate_expr(s)
-        s = fix_zero_page_minus_one(s)
-        emit(s + ((" " + cmt) if cmt else ""))
+        if macro_depth > 0:
+            s = preprocess_numbers(s, cur_radix)
+            s = normalize_symbol_tokens(s)
+            s = replace_bang_or(s)
+            s = clamp_immediate_expr(s)
+            s = fix_zero_page_minus_one(s)
+            emit(s + ((" " + cmt) if cmt else ""))
+        else:
+            s = fix_zero_page_minus_one(s)
+            emit(s + ((" " + cmt) if cmt else ""))
+
+        if re.match(r'^\s*\.macro\b', s, re.IGNORECASE):
+            macro_depth += 1
+        elif re.match(r'^\s*\.endmacro\b', s, re.IGNORECASE):
+            macro_depth = max(0, macro_depth - 1)
+        if re.match(r'^\s*\.if(n?def)?\b', s, re.IGNORECASE):
+            cond_stack.append(set())
+        elif re.match(r'^\s*\.else(if)?\b', s, re.IGNORECASE):
+            if cond_stack:
+                cond_stack[-1].clear()
+        elif re.match(r'^\s*\.endif\b', s, re.IGNORECASE):
+            if cond_stack:
+                cond_stack.pop()
     return "\n".join(out) + "\n"
 
 def build_sym_table(src: str, first_only: bool = False):
@@ -906,31 +1188,41 @@ def build_sym_table(src: str, first_only: bool = False):
 
 def convert(src_text: str):
     src_text = nl(src_text)
-    sym = build_sym_table(src_text, first_only=True)
     config = extract_config_overrides(src_text)
+    stage0 = convert_conditionals_to_ca65(src_text)
+    stage0, defines = convert_defines_to_macros(stage0)
+    stage0 = convert_repeat_to_ca65(stage0)
+    stage0 = convert_irpc_to_ca65(stage0)
+    sym = build_sym_table(stage0)
     sym.update(config)
-    stage0 = src_text
-    for _ in range(20):
-        stage0 = expand_conditionals(src_text, sym, pass_num=2)
-        new_sym = build_sym_table(stage0)
-        new_sym.update(config)
-        if new_sym == sym:
-            break
-        sym = new_sym
-    stage0 = expand_repeat(stage0, sym)
-    defines, spans = extract_defines(stage0)
-    src_wo_def = remove_spans(stage0, spans)
-    stage1 = expand_define_macros(src_wo_def, defines)
-    stage2 = expand_irpc_string_only(stage1)
-    stage2 = expand_exp_lines(stage2, sym)
-    stage3 = normalize_instruction_macros(stage2)
-    stage4 = normalize_directives(stage3)
-    return stage4, defines
+    stage1 = expand_exp_lines(stage0, sym)
+    stage2 = normalize_instruction_macros(stage1)
+    stage3 = normalize_directives(stage2)
+    helper = (
+        "; ca65 helper macros for converted source\n"
+        ".macro DC S,\n"
+        "    .if .match ({S}, \"\")\n"
+        "    .elseif .match (.left (1, {S}), 0)\n"
+        "        .byte {S}\n"
+        "    .else\n"
+        "        .repeat .strlen ({S}), I\n"
+        "            .if I = .strlen ({S}) - 1\n"
+        "                .byte (.strat ({S}, I) | $80)\n"
+        "            .else\n"
+        "                .byte .strat ({S}, I)\n"
+        "            .endif\n"
+        "        .endrepeat\n"
+        "    .endif\n"
+        ".endmacro\n"
+        "\n"
+    )
+    return helper + stage3, defines
 
 def find_unresolved(text: str):
     CA65_DIRS = {".org",".byte",".word",".res",".include",".segment",".proc",".endproc",".export",".import",
-                ".scope",".endscope",".setcpu",".ifdef",".ifndef",".if",".else",".endif",".repeat",".endrepeat",
-                ".macro",".endmacro",".local",".endlocal",".assert",".align",".asciiz",".ascii",".bank"}
+                ".scope",".endscope",".setcpu",".ifdef",".ifndef",".if",".else",".elseif",".endif",".repeat",".endrepeat",
+                ".macro",".endmacro",".local",".endlocal",".assert",".align",".asciiz",".ascii",".bank",".define",".undef",
+                ".exitmacro",".set"}
     unresolved = {}
     for ln_ in text.splitlines():
         code = ln_.split(";", 1)[0].strip()
