@@ -761,6 +761,8 @@ def normalize_directives(text: str, defines: dict | None = None):
     redefined = set()
     label_names = set()
     added_iscntc_import = False
+    segment_index = 0
+    used_segments = set()
     counts = {}
     for ln_ in nl(text).splitlines():
         code = ln_.split(";", 1)[0].strip()
@@ -1069,8 +1071,25 @@ def normalize_directives(text: str, defines: dict | None = None):
             emit_redefine("Q", step, "")
             continue
 
-        # ORG -> .org
-        s = re.sub(r'(?m)^\s*ORG\b', "    .org", s)
+        # ORG -> .org (and create segment)
+        m_org = re.match(r'^\s*(?:[A-Za-z0-9_%$]+:)?\s*ORG\s+(.+)$', s)
+        if m_org:
+            expr = m_org.group(1).strip()
+            seg_base = re.sub(r'[^A-Za-z0-9_]+', "_", expr).strip("_").upper()
+            if not seg_base:
+                segment_index += 1
+                seg_base = f"SEG_{segment_index:03d}"
+            if re.match(r'^[0-9]', seg_base):
+                seg_base = f"SEG_{seg_base}"
+            seg_name = seg_base
+            if seg_name in used_segments:
+                suffix = 2
+                while f"{seg_name}_{suffix}" in used_segments:
+                    suffix += 1
+                seg_name = f"{seg_name}_{suffix}"
+            used_segments.add(seg_name)
+            emit(f'    .segment "{seg_name}"')
+            s = re.sub(r'(?m)^\s*ORG\b', "    .org", s)
 
         # replace angle bracket grouping with parentheses (preserve <>)
         s = s.replace("<>", "__NEQ__")
