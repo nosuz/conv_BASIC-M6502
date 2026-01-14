@@ -101,6 +101,13 @@ def preprocess_numbers(expr: str, radix: int = 10):
         expr = re.sub(r"(?<![A-Z0-9_%$])([0-7]+)(?![A-Z0-9_%$])", repl_bare_oct, expr)
     return expr
 
+def strip_label_bang(s: str) -> str:
+    m = re.match(r'^(\s*)([A-Za-z0-9_%$]+):!\s*', s)
+    if m:
+        name = m.group(2)
+        return s.replace(f"{name}:!", f"{name}O:", 1)
+    return re.sub(r":\s*!", ":", s)
+
 ANGLE_OP_PAT = re.compile(r"<<([^<>]+?)\s*([&/])\s*([^<>]+?)>")
 
 def preprocess_angle_ops(expr: str):
@@ -199,17 +206,32 @@ def remove_spans(full: str, spans):
     out.append(full[last:])
     return "".join(out)
 
-def convert_defines_to_macros(text: str):
+def convert_defines_to_macros(text: str, skip_names: set | None = None):
     pat = re.compile(r'(?m)^\s*DEFINE\s+([A-Z0-9_%$]+)\s*(\([^)]*\))?\s*,\s*<')
     out = []
     last = 0
     defines = {}
     reserved_param_names = {"A", "X", "Y"}
+    skip_names = {n.upper() for n in (skip_names or set())}
     for m in pat.finditer(text):
         name = m.group(1)
+        body, end_pos = parse_balanced_angle(text, m.end() - 1)
+        if name.upper() in skip_names:
+            orig_text = text[m.start():end_pos]
+            orig_lines = orig_text.splitlines()
+            commented = []
+            indent = re.match(r"[ \t]*", text[m.start():]).group(0)
+            for ln_ in orig_lines:
+                if ln_.strip():
+                    commented.append(f"{indent}; {ln_.rstrip()}")
+                else:
+                    commented.append(f"{indent};")
+            out.append(text[last:m.start()])
+            out.append("\n".join(commented) + "\n")
+            last = end_pos
+            continue
         params = m.group(2)
         params = [p.strip() for p in params.strip()[1:-1].split(",") if p.strip()] if params else []
-        body, end_pos = parse_balanced_angle(text, m.end() - 1)
         param_map = {}
         safe_params = []
         used = set()
@@ -333,14 +355,6 @@ def convert_conditionals_to_ca65(text: str, max_iters: int = 8000):
         label, kind, expr = m.group(1), m.group(2).upper(), m.group(3).strip()
         block, end_pos = parse_conditional_block(out, m.end() - 1)
         block = convert_conditionals_to_ca65(block, max_iters=max_iters)
-        if label and block.strip():
-            bl = block.splitlines()
-            for i, ln_ in enumerate(bl):
-                if ln_.strip():
-                    bl[i] = f"{label}: {ln_.lstrip()}"
-                    break
-            block = "\n".join(bl)
-
         line_start = out.rfind("\n", 0, m.start()) + 1
         leading_ws = re.match(r"[ \t]*", out[line_start:]).group(0)
 
@@ -354,10 +368,17 @@ def convert_conditionals_to_ca65(text: str, max_iters: int = 8000):
         elif kind == "IFNDEF":
             cond = f".not .defined({expr})"
         else:  # IF1/IF2
-            cond = "1"
-            comment = f" ; {kind} (pass1 only in original)"
+            if kind == "IF1":
+                cond = "0"
+                comment = f" ; {kind} (pass1 only in original)"
+            else:
+                cond = "1"
+                comment = f" ; {kind} (pass2 only in original)"
 
-        parts = [f"{leading_ws}.if {cond}{comment}"]
+        parts = []
+        if label:
+            parts.append(f"{leading_ws}{label}:")
+        parts.append(f"{leading_ws}.if {cond}{comment}")
         if block:
             parts.append(block.rstrip("\n"))
         parts.append(f"{leading_ws}.endif")
@@ -588,7 +609,12 @@ def normalize_instruction_macros(text: str):
     for ln_ in nl(text).splitlines():
         code, *comment = ln_.split(";", 1)
         cmt = ";" + comment[0] if comment else ""
-        s = code.rstrip()
+        raw = code.rstrip()
+        m_bang_label = re.match(r'^\s*([A-Za-z0-9_%$]+):!\s*(.*)$', raw)
+        if m_bang_label:
+            s = f"{m_bang_label.group(1)}O: {m_bang_label.group(2)}"
+        else:
+            s = strip_label_bang(raw)
         if not s.strip():
             out.append(ln_)
             continue
@@ -722,14 +748,21 @@ def normalize_directives(text: str, defines: dict | None = None):
     sym_values = {}
     cur_radix = 10
     redefined = set()
+    label_names = set()
+    added_iscntc_import = False
     counts = {}
     for ln_ in nl(text).splitlines():
         code = ln_.split(";", 1)[0].strip()
         if not code:
             continue
+        m = re.match(r'^\s*([A-Za-z0-9_%$]+):', code)
+        if m:
+            label_names.add(m.group(1).upper())
         m = re.match(r'^\s*\.macro\s+([A-Za-z0-9_%$]+)\b', code, re.IGNORECASE)
         if m:
             defined_macros.add(m.group(1).upper())
+        if re.match(r'^\s*REALIO\s*(==|=)\s*', code) and "ISCNTC" in code:
+            added_iscntc_import = True
         m = re.match(r'^\s*([A-Za-z0-9_%$]+):\s*([A-Za-z0-9_%$]+)\s*(==|=)\s*', code)
         if m:
             counts[m.group(2)] = counts.get(m.group(2), 0) + 1
@@ -877,7 +910,11 @@ def normalize_directives(text: str, defines: dict | None = None):
         emit(f"    .define {name} {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=consume_label)
         defined_names.add(name)
 
-    predefine = [f"    .define {name} 0" for name in sorted(redefined) if name != "Q"]
+    predefine = [
+        f"    .define {name} 0"
+        for name in sorted(redefined)
+        if name != "Q" and name.upper() not in label_names
+    ]
 
     allowed_dot = {
         "org","byte","word","res","include","segment","proc","endproc","export","import",
@@ -964,9 +1001,12 @@ def normalize_directives(text: str, defines: dict | None = None):
             continue
 
         if macro_depth > 0 and not re.match(r'^\s*\.endmacro\b', s, re.IGNORECASE):
+            s = strip_label_bang(s)
             s = preprocess_numbers(s, cur_radix)
             s = normalize_symbol_tokens(s)
             s = replace_bang_or(s)
+            s = s.replace(":|", ":")
+            s = re.sub(r'^(\s*)ZSTORD:', r'\1ZSTORDO:', s)
             s = s.replace("<>", "__NEQ__")
             s = s.replace("<", "(").replace(">", ")")
             s = s.replace("__NEQ__", "<>")
@@ -1143,10 +1183,15 @@ def normalize_directives(text: str, defines: dict | None = None):
                     expr_out = str(val)
                 except Exception:
                     pass
-            if name in redefined:
+            if name in redefined and name.upper() not in label_names:
                 emit_redefine(name, expr_out, cmt, consume_label=False)
             else:
                 emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False)
+            if name == "REALIO" and not added_iscntc_import:
+                emit("    .if (REALIO-5) = 0", consume_label=False)
+                emit("        .import ISCNTC", consume_label=False)
+                emit("    .endif", consume_label=False)
+                added_iscntc_import = True
             seen_names.add(name)
             continue
 
@@ -1165,10 +1210,15 @@ def normalize_directives(text: str, defines: dict | None = None):
                     expr_out = str(val)
                 except Exception:
                     pass
-            if name in redefined:
+            if name in redefined and name.upper() not in label_names:
                 emit_redefine(name, expr_out, cmt)
             else:
                 emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""))
+            if name == "REALIO" and not added_iscntc_import:
+                emit("    .if (REALIO-5) = 0", consume_label=False)
+                emit("        .import ISCNTC", consume_label=False)
+                emit("    .endif", consume_label=False)
+                added_iscntc_import = True
             seen_names.add(name)
             continue
 
@@ -1190,6 +1240,8 @@ def normalize_directives(text: str, defines: dict | None = None):
         s = preprocess_numbers(s, cur_radix)
         s = normalize_symbol_tokens(s)
         s = replace_bang_or(s)
+        s = s.replace(":|", ":")
+        s = re.sub(r'^(\s*)ZSTORD:', r'\1ZSTORDO:', s)
         s = clamp_immediate_expr(s)
         if macro_depth > 0:
             s = preprocess_numbers(s, cur_radix)
@@ -1237,7 +1289,7 @@ def convert(src_text: str):
     src_text = nl(src_text)
     config = extract_config_overrides(src_text)
     stage0 = convert_conditionals_to_ca65(src_text)
-    stage0, defines = convert_defines_to_macros(stage0)
+    stage0, defines = convert_defines_to_macros(stage0, skip_names={"ROR"})
     stage0 = convert_repeat_to_ca65(stage0)
     stage0 = convert_irpc_to_ca65(stage0)
     sym = build_sym_table(stage0)
