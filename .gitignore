@@ -4,3 +4,4 @@ __pycache__/
 *.o
 *.lst
 *.bin
+AGENTS.md
