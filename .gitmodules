@@ -1,3 +1,6 @@
 [submodule "BASIC-M6502"]
 	path = BASIC-M6502
 	url = https://github.com/microsoft/BASIC-M6502.git
+[submodule "m6502emu"]
+	path = m6502emu
+	url = git@github.com:nosuz/m6502emu.git
