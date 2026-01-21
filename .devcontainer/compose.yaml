@@ -8,6 +8,7 @@ services:
         UID: ${UID:-1000}
         GID: ${GID:-1000}
         CODEX_BUST: ${CODEX_BUST:-0}
+        GEMINI_BUST: ${GEMINI_BUST:-0}
     command: sleep infinity
     volumes:
       - ..:/workspaces

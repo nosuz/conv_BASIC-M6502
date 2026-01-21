@@ -84,6 +84,11 @@ ARG CODEX_BUST=0
 RUN echo "CODEX_BUST=$CODEX_BUST" \
     && npm i -g @openai/codex
 
+# install Gemini
+ARG GEMINI_BUST=0
+RUN echo "GEMINI_BUST=$GEMINI_BUST" \
+    && npm install -g @google/gemini-cli
+
 # Default user
 USER vscode
 
