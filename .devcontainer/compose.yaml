@@ -3,9 +3,11 @@ services:
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
+      target: ${TARGET:-runtime}
       args:
         UID: ${UID:-1000}
         GID: ${GID:-1000}
+        CODEX_BUST: ${CODEX_BUST:-0}
     command: sleep infinity
     volumes:
       - ..:/workspaces
