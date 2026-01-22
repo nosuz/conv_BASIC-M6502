@@ -7,10 +7,17 @@ ca65 m6502.s --cpu 6502 -l m6502.lst -o m6502.o
 ld65 m6502.o -o m6502.bin -C linker.cfg
 
 INIT_ADDR="$(awk '/[[:space:]]INIT:/{print $1; exit}' m6502.lst | sed 's/^.*://')"
+PTR_BASE_ADDR="$(awk '/[[:space:]]TXTTAB:/{print $1; exit}' m6502.lst)"
 if [ -n "$INIT_ADDR" ]; then
   INIT_ADDR_HEX="0x${INIT_ADDR#00}"
   echo "INIT address: ${INIT_ADDR_HEX}"
-  echo "Run: ./m6502emu/run_m6502emu.sh --io pet --rom /workspaces/m6502.bin:0xC000 --start ${INIT_ADDR_HEX}"
+  if [ -n "$PTR_BASE_ADDR" ]; then
+    PTR_BASE_HEX="0x${PTR_BASE_ADDR#00}"
+  else
+    PTR_BASE_HEX="0x26"
+  fi
+  echo "PTR_BASE (TXTTAB): ${PTR_BASE_HEX}"
+  echo "Run: ./m6502emu/run_m6502emu.sh --io pet --ptr-base ${PTR_BASE_HEX} --rom /workspaces/m6502.bin:0xC000 --start ${INIT_ADDR_HEX}"
 else
   echo "INIT address not found in m6502.lst"
 fi
