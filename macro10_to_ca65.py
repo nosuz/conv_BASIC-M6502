@@ -705,6 +705,10 @@ def comment_if_plain_text_line(line: str) -> str:
         return line
     if t.startswith("PRINTX"):
         return line
+    if re.fullmatch(r'"[^"]+"\s*(?:\+\s*128)?', t):
+        return line
+    if re.fullmatch(r"'[^']+'\s*(?:\+\s*128)?", t):
+        return line
     if re.match(r'^ADR\s*\(', t):
         return line
 
@@ -1179,6 +1183,15 @@ def normalize_directives(
             if printx_msgs is not None and active:
                 printx_msgs.append(m_printx.group(1).strip())
             append_line("; " + s.strip(), src_line)
+            continue
+
+        m_lit = re.match(r'^\s*"([^"]*)"\s*(?:\+\s*128)?\s*$', s)
+        if not m_lit:
+            m_lit = re.match(r"^\s*'([^']*)'\s*(?:\+\s*128)?\s*$", s)
+        if m_lit:
+            set_high = bool(re.search(r'\+\s*128', s))
+            lab = re.match(r"^\s*", s).group(0)
+            emit(f"{lab}.byte {bytes_for_string(m_lit.group(1), set_high)}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # comment out dot directives like .CREF/.XCREF and "..." pseudo
