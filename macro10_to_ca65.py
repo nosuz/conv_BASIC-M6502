@@ -703,6 +703,8 @@ def comment_if_plain_text_line(line: str) -> str:
 
     if t.startswith("DC") or t.startswith("DT"):
         return line
+    if t.startswith("PRINTX"):
+        return line
     if re.match(r'^ADR\s*\(', t):
         return line
 
@@ -752,6 +754,7 @@ def normalize_directives(
     pass_num: int = 2,
     seed_sym: Optional[dict] = None,
     return_sym: bool = False,
+    printx_msgs: Optional[list[str]] = None,
 ):
     out = []
     defined_macros = set()
@@ -1171,6 +1174,13 @@ def normalize_directives(
             update_cond_state(s)
         active = cond_state[-1]["active"] if cond_state else True
 
+        m_printx = re.match(r'^\s*PRINTX\b(.*)$', s, re.IGNORECASE)
+        if m_printx:
+            if printx_msgs is not None and active:
+                printx_msgs.append(m_printx.group(1).strip())
+            append_line("; " + s.strip(), src_line)
+            continue
+
         # comment out dot directives like .CREF/.XCREF and "..." pseudo
         m_dot = re.match(r'^\s*\.(\w+)', s)
         if m_dot or re.match(r'^\s*\.\.\.', s):
@@ -1554,6 +1564,7 @@ def convert(src_text: str):
     src_text = nl(src_text)
     config = extract_config_overrides(src_text)
 
+    printx_msgs: list[str] = []
     stage0_p1 = convert_conditionals_to_ca65(src_text, pass_num=1)
     stage0_p1, defines_p1 = convert_defines_to_macros(stage0_p1)
     stage0_p1 = convert_repeat_to_ca65(stage0_p1)
@@ -1569,6 +1580,7 @@ def convert(src_text: str):
         pass_num=1,
         seed_sym=sym_p1,
         return_sym=True,
+        printx_msgs=printx_msgs,
     )
 
     stage0 = convert_conditionals_to_ca65(src_text, pass_num=2)
@@ -1588,6 +1600,15 @@ def convert(src_text: str):
         pass_num=2,
         seed_sym=sym_seed,
     )
+    printx_header = ""
+    if printx_msgs:
+        lines = ["; PRINTX messages (pass 1)"]
+        for msg in printx_msgs:
+            if msg:
+                lines.append(f"; PRINTX {msg}")
+            else:
+                lines.append("; PRINTX")
+        printx_header = "\n".join(lines) + "\n\n"
     helper = (
         "; ca65 helper macros for converted source\n"
         ".macro DC S\n"
@@ -1608,7 +1629,7 @@ def convert(src_text: str):
         else:
             helper_lines.append(f"{line} ;|SRC| (generated)")
     helper = "\n".join(helper_lines) + "\n"
-    return helper + stage3, defines
+    return printx_header + helper + stage3, defines, printx_msgs
 
 def find_unresolved(text: str):
     CA65_DIRS = {".org",".byte",".word",".res",".include",".segment",".proc",".endproc",".export",".import",
@@ -1650,8 +1671,15 @@ def main():
     args = ap.parse_args()
 
     src = args.input.read_text(errors="ignore")
-    out, defines = convert(src)
+    out, defines, printx_msgs = convert(src)
     args.output.write_text(out, encoding="utf-8")
+
+    if printx_msgs:
+        for msg in printx_msgs:
+            if msg:
+                print(f"PRINTX {msg}")
+            else:
+                print("PRINTX")
 
     if args.dump_macros:
         args.dump_macros.write_text(json.dumps({k: v["params"] for k, v in defines.items()}, indent=2), encoding="utf-8")
