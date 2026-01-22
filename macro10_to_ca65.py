@@ -87,6 +87,10 @@ def extract_config_overrides(src_text: str):
     return config
 
 def preprocess_numbers(expr: str, radix: int = 10):
+    if radix == 8:
+        def repl_bare_oct(m):
+            return str(int(m.group(1), 8))
+        expr = re.sub(r"(?<![A-Z0-9_%$])([0-7]+)(?![A-Z0-9_%$])", repl_bare_oct, expr)
     def repl_oct(m):
         return str(int(m.group(1), 8))
     def repl_dec(m):
@@ -96,10 +100,6 @@ def preprocess_numbers(expr: str, radix: int = 10):
     expr = re.sub(r"\^O([0-7]+)", repl_oct, expr)
     expr = re.sub(r"\^D([0-9]+)", repl_dec, expr)
     expr = re.sub(r"\^X([0-9A-F]+)", repl_hex, expr)
-    if radix == 8:
-        def repl_bare_oct(m):
-            return str(int(m.group(1), 8))
-        expr = re.sub(r"(?<![A-Z0-9_%$])([0-7]+)(?![A-Z0-9_%$])", repl_bare_oct, expr)
     return expr
 
 def strip_label_bang(s: str) -> str:
