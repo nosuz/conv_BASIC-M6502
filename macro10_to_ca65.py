@@ -263,10 +263,7 @@ def convert_defines_to_macros(text: str, skip_names: set | None = None):
         indent = re.match(r"[ \t]*", text[m.start():]).group(0)
         macro_head = f"{indent}.macro {out_name}"
         if params:
-            if len(params) == 1:
-                macro_head += " " + params[0] + ","
-            else:
-                macro_head += " " + ", ".join(params)
+            macro_head += " " + ", ".join(params)
 
         body_text = body
         if body_text.startswith("\n"):
@@ -755,6 +752,7 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
     pending_label = None
     defined_names = set()
     cond_stack = []
+    cond_state = []
     ror_stack = []
     macro_depth = 0
     preamble_emitted = False
@@ -841,6 +839,79 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
                 continue
             out.append("|" if c == "!" else c)
         return "".join(out)
+
+    def eval_cond_expr(expr: str) -> Optional[bool]:
+        expr = expr.split(";", 1)[0].strip()
+        if not expr:
+            return None
+        expr = normalize_symbol_tokens(expr)
+        def repl_not_defined(m):
+            name = m.group(1).strip()
+            return "1" if name not in sym_values else "0"
+        def repl_defined(m):
+            name = m.group(1).strip()
+            return "1" if name in sym_values else "0"
+        expr = re.sub(r"\.not\s+\.defined\s*\(\s*([A-Z0-9_%$]+)\s*\)", repl_not_defined, expr, flags=re.IGNORECASE)
+        expr = re.sub(r"\.defined\s*\(\s*([A-Z0-9_%$]+)\s*\)", repl_defined, expr, flags=re.IGNORECASE)
+        m = re.match(r"(.+?)\s*(<=|>=|<>|=|<|>)\s*(.+)", expr)
+        if m:
+            left = preprocess_numbers(m.group(1).strip(), cur_radix)
+            right = preprocess_numbers(m.group(3).strip(), cur_radix)
+            op = m.group(2)
+            try:
+                a = safe_eval_int(left, sym_values)
+                b = safe_eval_int(right, sym_values)
+            except Exception:
+                return None
+            if op == "=":
+                return a == b
+            if op == "<>":
+                return a != b
+            if op == "<":
+                return a < b
+            if op == "<=":
+                return a <= b
+            if op == ">":
+                return a > b
+            if op == ">=":
+                return a >= b
+            return None
+        try:
+            val = safe_eval_int(preprocess_numbers(expr, cur_radix), sym_values)
+        except Exception:
+            return None
+        return val != 0
+
+    def update_cond_state(line: str):
+        nonlocal cond_state
+        m_if = re.match(r'^\s*\.if\b(.*)$', line, re.IGNORECASE)
+        m_elseif = re.match(r'^\s*\.elseif\b(.*)$', line, re.IGNORECASE)
+        m_else = re.match(r'^\s*\.else\b', line, re.IGNORECASE)
+        m_endif = re.match(r'^\s*\.endif\b', line, re.IGNORECASE)
+        if m_if:
+            parent_active = cond_state[-1]["active"] if cond_state else True
+            cond_val = eval_cond_expr(m_if.group(1))
+            active = bool(parent_active and cond_val)
+            cond_state.append({"parent": parent_active, "taken": bool(cond_val), "active": active})
+            return
+        if m_elseif and cond_state:
+            parent_active = cond_state[-1]["parent"]
+            if cond_state[-1]["taken"]:
+                cond_state[-1]["active"] = False
+                return
+            cond_val = eval_cond_expr(m_elseif.group(1))
+            active = bool(parent_active and cond_val)
+            cond_state[-1]["active"] = active
+            cond_state[-1]["taken"] = bool(cond_val) or cond_state[-1]["taken"]
+            return
+        if m_else and cond_state:
+            parent_active = cond_state[-1]["parent"]
+            active = bool(parent_active and (not cond_state[-1]["taken"]))
+            cond_state[-1]["active"] = active
+            cond_state[-1]["taken"] = True
+            return
+        if m_endif and cond_state:
+            cond_state.pop()
 
     def bytes_for_string(s: str, set_high_bit_last: bool) -> str:
         vals = [ord(ch) & 0xFF for ch in s]
@@ -1089,6 +1160,9 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
         s = replace_char_literals(s)
         s = fix_trailing_commas_in_op(s)
         s = re.sub(r'(^|[ \t:])([A-Z][A-Z0-9_%$]+)"', r'\1\2 "', s)
+        if macro_depth == 0:
+            update_cond_state(s)
+        active = cond_state[-1]["active"] if cond_state else True
 
         # comment out dot directives like .CREF/.XCREF and "..." pseudo
         m_dot = re.match(r'^\s*\.(\w+)', s)
@@ -1138,7 +1212,15 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
                 lab = normalize_symbol_tokens(lab_raw)
                 left = m_xwd.group(2).strip()
                 right = m_xwd.group(3).strip()
-                emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""), src=src_line)
+                as_byte = False
+                try:
+                    as_byte = (safe_eval_int(left, sym_values) == 512)
+                except Exception:
+                    as_byte = False
+                if as_byte:
+                    emit(f"{lab}.byte {right}" + ((" " + cmt) if cmt else ""), src=src_line)
+                else:
+                    emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""), src=src_line)
                 continue
             stripped = s.strip()
             if re.fullmatch(r'[0-9\-\+\^$][0-9A-Fa-f\-\+\*/\(\) ]*', stripped):
@@ -1175,6 +1257,11 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
                 f"    ;|SRC| Q={step}",
             ]
             block_lines.extend(redefine_lines("Q", step, ""))
+            if active and "Q" in sym_values:
+                try:
+                    sym_values["Q"] = safe_eval_int(step, sym_values)
+                except Exception:
+                    pass
             emit_block(block_lines, src=src_line)
             continue
 
@@ -1240,14 +1327,22 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
             append_line(f"{m.group(1)} = {m.group(2)}" + ((" " + cmt) if cmt else ""), src_line)
             continue
 
-        # XWD left,right -> placeholder: two 16-bit words
+        # XWD left,right -> .word left,right (or .byte right when left==^O1000)
         m = re.match(r'^\s*([A-Za-z0-9_%$]+:)?\s*XWD\s+([^,]+)\s*,\s*(.+)$', s)
         if m:
             lab_raw = (m.group(1) + " " if m.group(1) else "    ")
             lab = normalize_symbol_tokens(lab_raw)
             left = normalize_symbol_tokens(preprocess_numbers(m.group(2).strip(), cur_radix))
             right = normalize_symbol_tokens(preprocess_numbers(m.group(3).strip(), cur_radix))
-            emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""), src=src_line)
+            as_byte = False
+            try:
+                as_byte = (safe_eval_int(left, sym_values) == 512)
+            except Exception:
+                as_byte = False
+            if as_byte:
+                emit(f"{lab}.byte {right}" + ((" " + cmt) if cmt else ""), src=src_line)
+            else:
+                emit(f"{lab}.word {left}, {right}" + ((" " + cmt) if cmt else ""), src=src_line)
             continue
 
         # DC/DT string literals
@@ -1315,7 +1410,7 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
             tokens = set(re.findall(r"\b[A-Z][A-Z0-9_%]*\b", expr))
             unknown = {t for t in tokens if t not in sym_values and t != name}
             expr_out = expr
-            if not unknown:
+            if active and not unknown:
                 try:
                     val = safe_eval_int(expr, sym_values)
                     sym_values[name] = val
@@ -1326,7 +1421,7 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
                 emit_redefine(name, expr_out, cmt, consume_label=False, src=src_line)
             else:
                 emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""), consume_label=False, src=src_line)
-            if name == "REALIO" and not added_iscntc_import:
+            if active and name == "REALIO" and not added_iscntc_import:
                 emit_block(
                     ["    .if (REALIO-5) = 0", "        .import ISCNTC", "    .endif"],
                     consume_label_first=False,
@@ -1344,7 +1439,7 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
             tokens = set(re.findall(r"\b[A-Z][A-Z0-9_%]*\b", expr))
             unknown = {t for t in tokens if t not in sym_values and t != name}
             expr_out = expr
-            if not unknown:
+            if active and not unknown:
                 try:
                     val = safe_eval_int(expr, sym_values)
                     sym_values[name] = val
@@ -1355,7 +1450,7 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
                 emit_redefine(name, expr_out, cmt, src=src_line)
             else:
                 emit(f"{name} = {expr_out}" + ((" " + cmt) if cmt else ""), src=src_line)
-            if name == "REALIO" and not added_iscntc_import:
+            if active and name == "REALIO" and not added_iscntc_import:
                 emit_block(
                     ["    .if (REALIO-5) = 0", "        .import ISCNTC", "    .endif"],
                     consume_label_first=False,
@@ -1459,19 +1554,14 @@ def convert(src_text: str):
     stage3 = normalize_directives(stage2, defines, annotate=True)
     helper = (
         "; ca65 helper macros for converted source\n"
-        ".macro DC S,\n"
-        "    .if .match ({S}, \"\")\n"
-        "    .elseif .match (.left (1, {S}), 0)\n"
-        "        .byte {S}\n"
-        "    .else\n"
-        "        .repeat .strlen ({S}), I\n"
-        "            .if I = .strlen ({S}) - 1\n"
-        "                .byte (.strat ({S}, I) | $80)\n"
-        "            .else\n"
-        "                .byte .strat ({S}, I)\n"
-        "            .endif\n"
-        "        .endrepeat\n"
-        "    .endif\n"
+        ".macro DC S\n"
+        "    .repeat .strlen (S), I\n"
+        "        .if I = .strlen (S) - 1\n"
+        "            .byte (.strat (S, I) | $80)\n"
+        "        .else\n"
+        "            .byte .strat (S, I)\n"
+        "        .endif\n"
+        "    .endrepeat\n"
         ".endmacro\n"
         "\n"
     )
