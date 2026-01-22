@@ -3,5 +3,7 @@ __pycache__/
 *.s
 *.o
 *.lst
+*.map
 *.bin
+*.log
 AGENTS.md
