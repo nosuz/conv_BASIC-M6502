@@ -352,7 +352,7 @@ def strip_conditionals(text: str, max_iters: int = 8000):
         out = out[:m.start()] + out[end_pos:]
     return out
 
-def convert_conditionals_to_ca65(text: str, max_iters: int = 8000):
+def convert_conditionals_to_ca65(text: str, pass_num: int = 2, max_iters: int = 8000):
     out = text
     for _ in range(max_iters):
         m = COND_PAT.search(out)
@@ -360,7 +360,7 @@ def convert_conditionals_to_ca65(text: str, max_iters: int = 8000):
             break
         label, kind, expr = m.group(1), m.group(2).upper(), m.group(3).strip()
         block, end_pos = parse_conditional_block(out, m.end() - 1)
-        block = convert_conditionals_to_ca65(block, max_iters=max_iters)
+        block = convert_conditionals_to_ca65(block, pass_num=pass_num, max_iters=max_iters)
         line_start = out.rfind("\n", 0, m.start()) + 1
         leading_ws = re.match(r"[ \t]*", out[line_start:]).group(0)
 
@@ -375,10 +375,10 @@ def convert_conditionals_to_ca65(text: str, max_iters: int = 8000):
             cond = f".not .defined({expr})"
         else:  # IF1/IF2
             if kind == "IF1":
-                cond = "0"
+                cond = "1" if pass_num == 1 else "0"
                 comment = f" ; {kind} (pass1 only in original)"
             else:
-                cond = "1"
+                cond = "1" if pass_num == 2 else "0"
                 comment = f" ; {kind} (pass2 only in original)"
 
         parts = []
@@ -745,7 +745,14 @@ def comment_if_plain_text_line(line: str) -> str:
 
     return line
 
-def normalize_directives(text: str, defines: dict | None = None, annotate: bool = False):
+def normalize_directives(
+    text: str,
+    defines: dict | None = None,
+    annotate: bool = False,
+    pass_num: int = 2,
+    seed_sym: Optional[dict] = None,
+    return_sym: bool = False,
+):
     out = []
     defined_macros = set()
     seen_names = set()
@@ -756,7 +763,7 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
     ror_stack = []
     macro_depth = 0
     preamble_emitted = False
-    sym_values = {}
+    sym_values = dict(seed_sym or {})
     cur_radix = 10
     redefined = set()
     label_names = set()
@@ -1521,7 +1528,10 @@ def normalize_directives(text: str, defines: dict | None = None, annotate: bool 
                 cond_stack.pop()
             if ror_stack:
                 ror_stack.pop()
-    return "\n".join(out) + "\n"
+    text_out = "\n".join(out) + "\n"
+    if return_sym:
+        return text_out, sym_values
+    return text_out
 
 def build_sym_table(src: str, first_only: bool = False):
     sym = {}
@@ -1543,7 +1553,25 @@ def build_sym_table(src: str, first_only: bool = False):
 def convert(src_text: str):
     src_text = nl(src_text)
     config = extract_config_overrides(src_text)
-    stage0 = convert_conditionals_to_ca65(src_text)
+
+    stage0_p1 = convert_conditionals_to_ca65(src_text, pass_num=1)
+    stage0_p1, defines_p1 = convert_defines_to_macros(stage0_p1)
+    stage0_p1 = convert_repeat_to_ca65(stage0_p1)
+    stage0_p1 = convert_irpc_to_ca65(stage0_p1)
+    sym_p1 = build_sym_table(stage0_p1)
+    sym_p1.update(config)
+    stage1_p1 = expand_exp_lines(stage0_p1, sym_p1)
+    stage2_p1 = normalize_instruction_macros(stage1_p1)
+    _stage3_p1, sym_p1 = normalize_directives(
+        stage2_p1,
+        defines_p1,
+        annotate=False,
+        pass_num=1,
+        seed_sym=sym_p1,
+        return_sym=True,
+    )
+
+    stage0 = convert_conditionals_to_ca65(src_text, pass_num=2)
     stage0, defines = convert_defines_to_macros(stage0)
     stage0 = convert_repeat_to_ca65(stage0)
     stage0 = convert_irpc_to_ca65(stage0)
@@ -1551,7 +1579,15 @@ def convert(src_text: str):
     sym.update(config)
     stage1 = expand_exp_lines(stage0, sym)
     stage2 = normalize_instruction_macros(stage1)
-    stage3 = normalize_directives(stage2, defines, annotate=True)
+    sym_seed = dict(sym_p1)
+    sym_seed.update(sym)
+    stage3 = normalize_directives(
+        stage2,
+        defines,
+        annotate=True,
+        pass_num=2,
+        seed_sym=sym_seed,
+    )
     helper = (
         "; ca65 helper macros for converted source\n"
         ".macro DC S\n"
