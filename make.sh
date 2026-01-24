@@ -49,6 +49,8 @@ PRINTX_OUT="$(python macro10_to_ca65.py -o ./m6502.s BASIC-M6502/m6502.asm | tee
 ca65 m6502.s --cpu 6502 -l m6502.lst -o m6502.o
 
 INIT_ADDR="$(awk '/[[:space:]]INIT:/{print $1; exit}' m6502.lst | sed 's/^.*://')"
+STOP_ADDR="$(awk '/[[:space:]]STOP:/{print $1; exit}' m6502.lst | sed 's/^.*://')"
+ISCNTC_ADDR="$(awk '/[[:space:]]ISCNTC:/{print $1; exit}' m6502.lst | sed 's/^.*://')"
 PTR_BASE_ADDR="$(awk '/[[:space:]]TXTTAB:/{print $1; exit}' m6502.lst)"
 IO_PROFILE=""
 if [ -n "${TARGET_PLATFORM}" ]; then
@@ -98,6 +100,16 @@ fi
 ld65 m6502.o -o m6502.bin -C "${LINKER_CFG}"
 if [ -n "$INIT_ADDR" ]; then
   INIT_ADDR_HEX="0x${INIT_ADDR#00}"
+  if [ -n "$STOP_ADDR" ]; then
+    STOP_ADDR_HEX="0x${STOP_ADDR#00}"
+  else
+    STOP_ADDR_HEX=""
+  fi
+  if [ -n "$ISCNTC_ADDR" ]; then
+    ISCNTC_ADDR_HEX="0x${ISCNTC_ADDR#00}"
+  else
+    ISCNTC_ADDR_HEX=""
+  fi
   echo "INIT address: ${INIT_ADDR_HEX}"
   if [ -n "$PTR_BASE_ADDR" ]; then
     PTR_BASE_HEX="0x${PTR_BASE_ADDR#00}"
@@ -106,11 +118,27 @@ if [ -n "$INIT_ADDR" ]; then
   fi
   echo "IO profile: ${IO_PROFILE}"
   echo "PTR_BASE (TXTTAB): ${PTR_BASE_HEX}"
+  if [ -n "$STOP_ADDR_HEX" ]; then
+    echo "STOP address: ${STOP_ADDR_HEX}"
+  fi
+  if [ "${IO_PROFILE}" = "apple2" ] && [ -n "$ISCNTC_ADDR_HEX" ]; then
+    echo "ISCNTC address: ${ISCNTC_ADDR_HEX}"
+  fi
   if [ "${IO_PROFILE}" = "apple2" ]; then
     echo "ROM start: ${ROM_START_0X}"
-    echo "Run: ./m6502emu/run_m6502emu.sh --io ${IO_PROFILE} --rom /workspaces/m6502.bin:${ROM_START_0X} --start ${INIT_ADDR_HEX}"
+    if [ -n "$STOP_ADDR_HEX" ] && [ -n "$ISCNTC_ADDR_HEX" ]; then
+      echo "Run: ./m6502emu/run_m6502emu.sh --io ${IO_PROFILE} --rom /workspaces/m6502.bin:${ROM_START_0X} --start ${INIT_ADDR_HEX} --break-target ${STOP_ADDR_HEX} --iscntc ${ISCNTC_ADDR_HEX}"
+    elif [ -n "$STOP_ADDR_HEX" ]; then
+      echo "Run: ./m6502emu/run_m6502emu.sh --io ${IO_PROFILE} --rom /workspaces/m6502.bin:${ROM_START_0X} --start ${INIT_ADDR_HEX} --break-target ${STOP_ADDR_HEX}"
+    else
+      echo "Run: ./m6502emu/run_m6502emu.sh --io ${IO_PROFILE} --rom /workspaces/m6502.bin:${ROM_START_0X} --start ${INIT_ADDR_HEX}"
+    fi
   else
-    echo "Run: ./m6502emu/run_m6502emu.sh --io ${IO_PROFILE} --ptr-base ${PTR_BASE_HEX} --rom /workspaces/m6502.bin:0xC000 --start ${INIT_ADDR_HEX}"
+    if [ -n "$STOP_ADDR_HEX" ]; then
+      echo "Run: ./m6502emu/run_m6502emu.sh --io ${IO_PROFILE} --ptr-base ${PTR_BASE_HEX} --rom /workspaces/m6502.bin:0xC000 --start ${INIT_ADDR_HEX} --break-target ${STOP_ADDR_HEX}"
+    else
+      echo "Run: ./m6502emu/run_m6502emu.sh --io ${IO_PROFILE} --ptr-base ${PTR_BASE_HEX} --rom /workspaces/m6502.bin:0xC000 --start ${INIT_ADDR_HEX}"
+    fi
   fi
 else
   echo "INIT address not found in m6502.lst"
