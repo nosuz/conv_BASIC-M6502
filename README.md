@@ -69,12 +69,12 @@ Typical examples:
 
 Apple II:
 ```sh
-./m6502emu/run_m6502emu.sh --io apple2 --rom /workspaces/m6502.bin:0x0800 --start 0x26E0
+./m6502emu/run_m6502emu.sh --io apple2 --rom /workspaces/m6502.bin:0x0800 --start 0x26D4 --break-target 0x0E1F --iscntc 0x0E12
 ```
 
 PET:
 ```sh
-./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F
+./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F --break-target 0xC66
 ```
 
 #### Stop the Emulator
@@ -95,24 +95,49 @@ and Commodore PET ones, and it appears KIM has the same one as Apple.
 
 #### Apple Easter Egg
 
-At the memory-size prompt, enter `A` instead of `Enter` to see the author
-message:
+At the memory-size prompt (`MEMORY SIZE ?`), enter `A` and then `Enter` to see
+the author message:
 ```
+MEMORY SIZE ? A
+
 WRITTEN BY WEILAND & GATES
+MEMORY SIZE ?
 ```
 
 #### PET Easter Egg (Screen Memory)
 Running `WAIT6502,1` (or `WAIT6502,2`) writes `MICROSOFT!` to PET video RAM
 (`$8000`) the number of times given by the last digit.
 
-Because it writes to VRAM, enable capture to see it in the console:
+Because it writes to VRAM, enable the capture option `--pet-screen-capture` to
+see it in the console:
 ```sh
 ./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F --pet-screen-capture
 ```
-Then enter:
+Then enter `WAIT6502,1` (the last digit can be any number):
 ```
-WAIT6502,1
+READY.
 WAIT6502,2
+[PET SCREEN $8000] $0D 'M'
+[PET SCREEN $8001] $09 'I'
+[PET SCREEN $8002] $03 'C'
+[PET SCREEN $8003] $12 'R'
+[PET SCREEN $8004] $0F 'O'
+[PET SCREEN $8005] $13 'S'
+[PET SCREEN $8006] $0F 'O'
+[PET SCREEN $8007] $06 'F'
+[PET SCREEN $8008] $14 'T'
+[PET SCREEN $8009] $21 '!'
+[PET SCREEN $800A] $0D 'M'
+[PET SCREEN $800B] $09 'I'
+[PET SCREEN $800C] $03 'C'
+[PET SCREEN $800D] $12 'R'
+[PET SCREEN $800E] $0F 'O'
+[PET SCREEN $800F] $13 'S'
+[PET SCREEN $8010] $0F 'O'
+[PET SCREEN $8011] $06 'F'
+[PET SCREEN $8012] $14 'T'
+[PET SCREEN $8013] $21 '!'
+READY.
 ```
 
 ### Quick Test

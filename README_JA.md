@@ -57,12 +57,12 @@ MOS 6502エミュレータで作成したバイナルを実行するコマンド
 
 Apple II:
 ```sh
-./m6502emu/run_m6502emu.sh --io apple2 --rom /workspaces/m6502.bin:0x0800 --start 0x26E0
+./m6502emu/run_m6502emu.sh --io apple2 --rom /workspaces/m6502.bin:0x0800 --start 0x26D4 --break-target 0x0E1F --iscntc 0x0E12
 ```
 
 PET:
 ```sh
-./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F
+./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F --break-target 0xC66
 ```
 
 #### 停止方法
@@ -83,22 +83,46 @@ PET:
 
 #### Appleのイースターエッグ
 
-起動時のメモリサイズ入力で`Enter`ではなく`A` を入力すると作者メッセージが表示されます。
+起動時のメモリサイズ入力`MEMORY SIZE ?`で、そのまま`Enter`ではなく`A` を入力してから`Enter`を入力すると作者メッセージが表示されます。
 ```
+MEMORY SIZE ? A
+
 WRITTEN BY WEILAND & GATES
+MEMORY SIZE ?
 ```
 
 #### PETのイースターエッグ（画面メモリ）
 `WAIT6502,1`（または `WAIT6502,2`）を実行すると、PETのビデオRAM（`$8000`）に最後の数字の回数だけ `MICROSOFT!` が書き込まれます。
 
-コンソールではなくビデオメモリ(VRAM)に書き込まれるので、表示するにはキャプチャを有効にしてください。
+コンソールではなくビデオメモリ(VRAM)に書き込まれるので、表示するにはキャプチャオプション`--pet-screen-capture`を有効にしてください。
 ```sh
 ./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F --pet-screen-capture
 ```
-実行後に以下を入力します：
+実行後に`WAIT6502,1`を入力します。最後の`1`は、別の数字でもOKです。
 ```
-WAIT6502,1
+READY.
 WAIT6502,2
+[PET SCREEN $8000] $0D 'M'
+[PET SCREEN $8001] $09 'I'
+[PET SCREEN $8002] $03 'C'
+[PET SCREEN $8003] $12 'R'
+[PET SCREEN $8004] $0F 'O'
+[PET SCREEN $8005] $13 'S'
+[PET SCREEN $8006] $0F 'O'
+[PET SCREEN $8007] $06 'F'
+[PET SCREEN $8008] $14 'T'
+[PET SCREEN $8009] $21 '!'
+[PET SCREEN $800A] $0D 'M'
+[PET SCREEN $800B] $09 'I'
+[PET SCREEN $800C] $03 'C'
+[PET SCREEN $800D] $12 'R'
+[PET SCREEN $800E] $0F 'O'
+[PET SCREEN $800F] $13 'S'
+[PET SCREEN $8010] $0F 'O'
+[PET SCREEN $8011] $06 'F'
+[PET SCREEN $8012] $14 'T'
+[PET SCREEN $8013] $21 '!'
+READY.
 ```
 
 
