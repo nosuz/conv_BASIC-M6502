@@ -1,97 +1,185 @@
-# Boilerplate for VSCode Dev Container
+## Real BASIC-M6502 on ca65 (Happy Retro BASIC) 😊
 
-VSCode の dev container を使用するための雛形です。
+日本語の`README`は、[README_JA](./README_JA.md)を参照してください。
 
-### pre-required packages
+The Microsoft-published MOS 6502 BASIC source in
+[BASIC-M6502](https://github.com/microsoft/BASIC-M6502) is written in MACRO-10,
+so it cannot be assembled directly with the `ca65` assembler from the standard
+6502 toolchain `cc65`.
 
-```bash
-sudo apt install docker.io docker-buildx docker-compose-v2
+This project builds a converter that transforms the MACRO-10 source into
+ca65-compatible assembly. You can then assemble the converted source into a
+binary and run it on the bundled emulator. 🎉
+
+### Goals
+- Convert `BASIC-M6502/m6502.asm` into ca65-ready `m6502.s`
+- Build a binary with `ca65` / `ld65`
+- Run it with `m6502emu`
+
+### Required Tools
+- `python3`
+- `ca65` and `ld65` (cc65 toolchain)
+- `bash`
+
+This project includes dev container configuration, and those tools are already
+installed in the container. ✅
+
+### Submodules
+This repository uses git submodules (for example, `m6502emu`). Since
+`BASIC-M6502` is also a submodule, you need to clone with submodules enabled.
+
+#### Initialize submodules
+
+```sh
+git submodule update --init --recursive
 ```
 
-### add user
+Clone with submodules from the start:
 
-```bash
-sudo usermod -aG docker $USER
+```sh
+git clone --recurse-submodules https://github.com/nosuz/conv_BASIC-M6502.git
 ```
 
-### clone boilerplate files
+### Platform Switch (REALIO)
 
-1. このレポジトリを次のコマンドでクローンしてください。
+The target platform is controlled by `REALIO` in `BASIC-M6502/m6502.asm`. Change
+that value to switch the platform.
 
-```bash
-git clone https://github.com/nosuz/dev_container.git
-cd dev_container
-rm -r .git
-git init
-git -m main # if needed
+### Build (Create Binary)
 
-code .
-# Edit .devcontainer/Dockerfile to install required APT packages before rebuilding this container.
+Use `make.sh` to rewrite `REALIO` for the chosen platform, generate ca65
+assembly, and build the binary.
+
+```sh
+./make.sh apple2
 ```
 
-2. オプション：`.devcontainer/generate_env.sh`または`.devcontainer/generate_env.sh`を実行して USER ID を`.devcontainer/.env`に書き込んでおいてください。このオプションを実行することで、Python のライブラリーのようにユーザ権限でインストールされるファイルがある場合に、docker image の作成に必要な時間が短くなり、イメージのサイズが小さくなります。
+Or:
 
-```bash
-bash .devcontainer/generate_env.sh
-# or
-python .devcontainer/generate_env.py
+```sh
+./make.sh pet
 ```
 
-3. 必要なパッケージをインストールするように Dockerfile を編集してください。
-4. このディレクトリを VSCode で開き、コマンドパレット(Ctrl + Shift + P)で Dev Containers: Rebuild container を実行すると、コンテナイメージが作成されて接続されます。
+If you pass an unsupported value, the script prints the allowed options and
+exits.
 
-### user name and id
+### Run
+The command to run the binary on the MOS 6502 emulator is printed by `make.sh`.
+Typical examples:
 
-このコンテナは、コンテナを開いたユーザと同じ ID で実行されます。そのため権限の問題なしにディレクトリを共有できます。ただしコンテナ内のユーザ名は、`vscode`となり、`ls -l`で共有ディレクトリを見るとユーザ名が元と変わって`vscode`になります。
-
-また、`.devcontainer/devcontainer.json`の`remoteUser`で`root`を指定した場合には、root 権限で実行されます。
-
-## VSCode settings and extensions
-
-Dev container では、VSCode の設定と機能拡張がリセットされます。そこで、必要な設定と機能拡張を`.devcontainer/devcontainer.json`の`customizations`に記載します。
-
-```
-// devcontainer.json
-{
-  "customizations": {
-    "vscode": {
-      "settings": {},
-      "extensions": ["mhutchie.git-graph", "streetsidesoftware.code-spell-checker"]
-    }
-  }
-}
+Apple II:
+```sh
+./m6502emu/run_m6502emu.sh --io apple2 --rom /workspaces/m6502.bin:0x0800 --start 0x26E0
 ```
 
-初期設定では、[Code Spell Checker](https://marketplace.visualstudio.com/items?itemName=streetsidesoftware.code-spell-checker)と[Git Graph](https://marketplace.visualstudio.com/items?itemName=mhutchie.git-graph)がインストールされます。
-
-## Git
-
-editor が設定されていないため、コマンドラインから`git commit --amend`など編集が必要な操作ができません。そこで、`.git/config`に`editor`の設定を加えます。
-
-```
-[core]
- editor = code --wait
+PET:
+```sh
+./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F
 ```
 
-ローカルの`~/.gitconfig`に設定がある場合は、デフォルト設定ではこのファイルがコピーされるのでコンテナ毎の設定は不要です。
+#### Stop the Emulator
+`m6502emu` must be stopped by an external signal. Open another terminal and run:
 
-### GitHub access
-
-GitHub は、`ssh`パッケージをインストールしてあれば他に特別な設定無く使用できると思います。次のコマンドで GitHub への接続を確認できます。
-
-```command
-$ ssh -T git@github.com
-Hi nosuz! You've successfully authenticated, but GitHub does not provide shell access.
+```sh
+./m6502emu/run_m6502emu.sh --kill
 ```
 
-## Docker Images
+### Apple SAVE/LOAD Note
+In `BASIC-M6502/m6502.asm`, the SAVE/LOAD commands are disabled by default.
+Enable `DISKO==1` inside the `REALIO=4` block to build with SAVE/LOAD.
 
-古いイメージは、次のコマンドで一括削除できます。
+### Easter Eggs 🥚
 
-```bash
-for i in $(docker image ls | awk '$1 == "<none>" && $2 == "<none>" { print $3 }'); do echo $i; docker image rm $i; done
+`BASIC-M6502` is known to contain several easter eggs. We confirmed the Apple
+and Commodore PET ones, and it appears KIM has the same one as Apple.
+
+#### Apple Easter Egg
+
+At the memory-size prompt, enter `A` instead of `Enter` to see the author
+message:
+```
+WRITTEN BY WEILAND & GATES
 ```
 
-## 参考
+#### PET Easter Egg (Screen Memory)
+Running `WAIT6502,1` (or `WAIT6502,2`) writes `MICROSOFT!` to PET video RAM
+(`$8000`) the number of times given by the last digit.
 
-- [Docker や VSCode + Remote-Container のパーミッション問題に立ち向かう](https://zenn.dev/forrep/articles/8c0304ad420c8e)
+Because it writes to VRAM, enable capture to see it in the console:
+```sh
+./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F --pet-screen-capture
+```
+Then enter:
+```
+WAIT6502,1
+WAIT6502,2
+```
+
+### Quick Test
+```sh
+printf '10 A=1\r20 PRINT A\rRUN\r' | ./m6502emu/run_m6502emu.sh --io pet --ptr-base 0x0026 --rom /workspaces/m6502.bin:0xC000 --start 0xE03F
+```
+
+### Dev Container 🐳
+This project is designed to run inside a dev container.
+
+Open the folder in VS Code, then use the Command Palette (Ctrl+Shift+P) and run
+`Dev Containers: Rebuild and Reopen in Container` or
+`Dev Containers: Reopen in Container`. The first run takes some time while the
+container builds.
+
+### Apple Ctrl-C Note
+In the Apple build, `ISCNTC` lives in `BASIC-M6502/m6502.asm` and reads the
+keyboard strobe at `$C000`. The relevant code is:
+```asm
+ISCNTC: LDA $C000        ; ^O140000
+        CMP #$83         ; ^O203 (Ctrl-C)
+        BEQ ISCCAP
+        RTS
+ISCCAP: JSR INCHR
+        CMP #$83
+        ; next is STOP
+```
+However, `INCHR` masks the input to 7-bit ASCII:
+```asm
+INCHR:  JSR CQINCH       ; FD0C
+        AND #$7F
+        RTS
+```
+So the second `CMP #$83` fails (the value becomes `$03`), and `STOP` does not
+recognize Ctrl-C. The original code therefore ignores Ctrl-C while a program is
+running.
+
+To make BREAK work, the emulator traps `JSR ISCNTC` and jumps to `STOP` with
+Carry/Z set for the Ctrl-C case.
+
+### PET Ctrl-C Note
+First, note that the BASIC statement loop calls `ISCNTC` but does not branch on
+its return value:
+```asm
+NEWSTT:
+        JSR ISCNTC
+        ; LISTEN FOR CONTROL-C.
+        LDWD TXTPTR
+        ...
+        JMP NEWSTT
+```
+There is no conditional branch after `JSR ISCNTC`.
+
+In the source, `ISCNTC` handles Ctrl-C by falling through into `STOP`:
+```asm
+ISCNTC: ...
+        CMP #3
+        ; Ctrl-C → fall through
+STOP:   BCS STOPC
+END:    CLC
+STOPC:  BNE CONTRT
+        ...
+```
+
+On PET, `ISCNTC` is a KERNAL entry (`ISCNTC=^O177741` → `$FFF1`), so BASIC calls
+into ROM instead of its local `ISCNTC`. The key point is that the **KERNAL
+`ISCNTC` knows the BASIC `STOP` address** on real hardware and can transfer
+control there when Ctrl-C is pressed. In the emulator there is no KERNAL ROM, so
+the stub must jump to `STOP` explicitly. That is why PET builds require
+`--break-target`.
