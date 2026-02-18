@@ -18,8 +18,8 @@ ENV LC_CTYPE=ja_JP.UTF-8
 ENV TZ=Asia/Tokyo
 
 ARG USERNAME=vscode
-ARG UID=10000
-ARG GID=$UID
+ARG UID=$UID
+ARG GID=$GID
 
 # Setup user and group id
 # Remove all general users and create a new user for USER direction.
